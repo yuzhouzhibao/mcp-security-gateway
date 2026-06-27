@@ -1,0 +1,48 @@
+[project]
+name = "mcp-security-gateway"
+version = "0.1.0"
+description = "Security gateway skeleton for MCP server access control."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.17.0",
+    "fastapi>=0.116.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic-settings>=2.10.0",
+    "sqlalchemy>=2.0.0",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.0",
+    "mypy>=1.16.0",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.0.0",
+    "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require an explicit PostgreSQL TEST_DATABASE_URL",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["mcp_security_gateway"]
+plugins = ["pydantic.mypy"]
