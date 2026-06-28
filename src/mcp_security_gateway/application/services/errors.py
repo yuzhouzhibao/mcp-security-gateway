@@ -48,6 +48,16 @@ class ToolServerNotFoundError(ApplicationError):
         )
 
 
+class ToolServerConflictError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("tool_server_conflict", "Tool server already exists for tenant")
+
+
+class ToolServerConfigurationError(ApplicationError):
+    def __init__(self, message: str) -> None:
+        super().__init__("tool_server_configuration_invalid", message)
+
+
 class ToolNotFoundError(ApplicationError):
     def __init__(self, trace_id: str | None = None) -> None:
         super().__init__(
@@ -87,6 +97,24 @@ class IdempotencyConflictError(ApplicationError):
 class McpClientNotConfiguredError(ApplicationError):
     def __init__(self) -> None:
         super().__init__("mcp_client_not_configured", "MCP client is not configured")
+
+
+class McpTransportNotSupportedError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__(
+            "transport_not_supported_yet",
+            "MCP transport is not supported yet",
+        )
+
+
+class McpToolListFailedError(ApplicationError):
+    def __init__(self, code: str = "mcp_tool_list_failed") -> None:
+        message = "MCP tool discovery failed"
+        if code == "mcp_timeout":
+            message = "MCP tool discovery timed out"
+        if code == "transport_not_supported_yet":
+            message = "MCP transport is not supported yet"
+        super().__init__(code, message)
 
 
 class ApprovalNotFoundError(ApplicationError):

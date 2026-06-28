@@ -69,4 +69,21 @@ uv run pytest -m integration
 
 `TEST_DATABASE_URL` must be explicit. Integration tests create isolated PostgreSQL schemas per test session and do not use a local file database substitute.
 
-Approval flow tests use the MCP client port with a test-only client under `tests/fakes`. The production app does not select that client by default.
+Run the real MCP stdio e2e test:
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
+uv run pytest -m e2e
+```
+
+Tool Registry development flow:
+
+1. Start PostgreSQL.
+2. Run migrations.
+3. Create an agent.
+4. Register `examples/mcp_servers/calculator_server.py` as a stdio ToolServer.
+5. Refresh discovered tools.
+6. Classify the discovered `add` tool as low risk, read-only, and active.
+7. Call it through `POST /v1/tool-calls`.
+
+Approval flow and gateway tests use the MCP client port with a test-only client. The production app selects the real stdio adapter by default.

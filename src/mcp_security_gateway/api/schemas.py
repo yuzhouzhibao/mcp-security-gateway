@@ -5,11 +5,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from mcp_security_gateway.domain.enums import (
+    ActionType,
     AgentRole,
     ApprovalStatus,
     EntityStatus,
     PolicyEffect,
+    RiskLevel,
     ToolCallStatus,
+    TransportType,
 )
 
 
@@ -95,3 +98,62 @@ class ApprovalActionResponse(BaseModel):
     tool_call_status: ToolCallStatus
     result: dict[str, Any] | None = None
     error: ApprovalActionErrorBody | None = None
+
+
+class ToolServerCreateRequest(BaseModel):
+    tenant_id: UUID
+    server_id: str
+    name: str
+    transport_type: TransportType
+    endpoint_url: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env: dict[str, Any] | None = None
+
+
+class ToolServerResponse(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    server_id: str
+    name: str
+    transport_type: TransportType
+    endpoint_url: str | None
+    command: str | None
+    args: list[str] | None
+    status: EntityStatus
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ToolServerListResponse(BaseModel):
+    items: list[ToolServerResponse]
+
+
+class ToolServerRefreshRequest(BaseModel):
+    tenant_id: UUID
+
+
+class ToolDefinitionResponse(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    server_id: UUID
+    tool_name: str
+    description: str | None
+    input_schema: dict[str, Any]
+    risk_level: RiskLevel
+    action_type: ActionType
+    status: EntityStatus
+    schema_hash: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ToolDefinitionListResponse(BaseModel):
+    items: list[ToolDefinitionResponse]
+
+
+class ToolDefinitionUpdateRequest(BaseModel):
+    risk_level: RiskLevel | None = None
+    action_type: ActionType | None = None
+    status: EntityStatus | None = None
+    description: str | None = None

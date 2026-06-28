@@ -28,11 +28,15 @@ The project currently provides:
 - Admin approval endpoints for listing approvals, approving pending approvals, and denying pending approvals.
 - Approved requests execute the original server-side execution payload through the MCP client port.
 - Approval state transitions are guarded by conditional updates so repeated approval attempts do not execute upstream twice.
+- Real MCP stdio adapter using the official MCP Python SDK.
+- Admin Tool Registry endpoints for registering ToolServers, refreshing discovered tools, listing ToolDefinitions, and updating ToolDefinition risk/action/status classification.
+- MCP tool discovery for stdio servers. Newly discovered tools default to `critical`, `privileged`, and `disabled`.
+- A local calculator MCP stdio example server under `examples/mcp_servers/calculator_server.py`.
 - SQLAlchemy ORM models and repository implementations.
 - Alembic initial migration.
 - Test, lint, type-check, Docker Compose, and CI infrastructure.
 
-Audit query APIs, federated identity, real MCP adapters, and MCP discovery are not implemented. Test-only MCP clients are used only in tests and are not production adapters.
+Audit query APIs, federated identity, and Streamable HTTP MCP transport are not implemented. Streamable HTTP servers return `transport_not_supported_yet` when used for discovery or calls. Test-only MCP clients are used only in tests and are not production adapters.
 
 ## Local Development
 
@@ -118,3 +122,18 @@ uv run pytest -m integration
 ```
 
 Integration tests create isolated PostgreSQL schemas per test session so separate test processes do not share tables.
+
+Run the real stdio MCP e2e test:
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
+uv run pytest -m e2e
+```
+
+Tool Registry demo outline:
+
+1. Create an admin-authenticated agent with `POST /v1/admin/agents`.
+2. Register `examples/mcp_servers/calculator_server.py` as a stdio ToolServer with `POST /v1/admin/tool-servers`.
+3. Discover tools with `POST /v1/admin/tool-servers/{server_id}/refresh-tools`.
+4. Classify a discovered tool, for example `add`, with `PATCH /v1/admin/tool-definitions/{tool_definition_id}`.
+5. Call it through `POST /v1/tool-calls` as an authenticated agent.

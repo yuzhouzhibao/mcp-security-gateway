@@ -51,3 +51,13 @@ Phase 6 adds approval execution:
 - Approved execution uses `tool_calls.arguments_payload`, never redacted arguments.
 - `arguments_payload` exists only while an approval is pending execution. It is cleared after executed, failed, denied, or expired approval outcomes.
 - `arguments_payload` is not returned by APIs and is not written to audit events or logs. The MVP stores this server-side payload as JSONB; production hardening should encrypt it with a managed key service.
+
+Phase 7A adds real MCP stdio integration and Tool Registry APIs:
+
+- Production app startup uses the real stdio MCP adapter, not the test-only client.
+- New ToolDefinitions discovered from MCP servers default to `critical`, `privileged`, and `disabled`.
+- Discovery refresh updates description, input schema, and schema hash, but it does not overwrite manual risk level, action type, or status classification.
+- Admins must explicitly classify and enable a tool before agents can call it.
+- ToolServer `env` values are stored for server execution but are not returned by Tool Registry API responses and are not written to audit events.
+- Streamable HTTP MCP transport returns `transport_not_supported_yet` in this phase.
+- MCP adapter failures are recorded as failed ToolCalls and AuditEvents; they are not reported as successful tool calls.

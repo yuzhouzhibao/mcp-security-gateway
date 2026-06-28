@@ -103,7 +103,7 @@ class ToolServerModel(Base):
     transport_type: Mapped[TransportType] = mapped_column(String(32), nullable=False)
     endpoint_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     command: Mapped[str | None] = mapped_column(Text, nullable=True)
-    args: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    args: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     env: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[EntityStatus] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

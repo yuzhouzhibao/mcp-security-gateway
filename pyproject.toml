@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.17.0",
     "fastapi>=0.116.0",
     "jsonschema>=4.25.0",
+    "mcp[cli]>=1.28.1",
     "psycopg[binary]>=3.2.0",
     "pydantic-settings>=2.10.0",
     "sqlalchemy>=2.0.0",
@@ -34,6 +35,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: tests that require an explicit PostgreSQL TEST_DATABASE_URL",
+    "e2e: tests that exercise a real local MCP stdio server through the gateway",
 ]
 
 [tool.ruff]

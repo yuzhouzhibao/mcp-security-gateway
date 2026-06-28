@@ -18,9 +18,13 @@ from mcp_security_gateway.application.services.errors import (
     ArgumentSchemaInvalidError,
     IdempotencyConflictError,
     McpClientNotConfiguredError,
+    McpToolListFailedError,
+    McpTransportNotSupportedError,
     TenantNotFoundError,
     ToolDisabledError,
     ToolNotFoundError,
+    ToolServerConfigurationError,
+    ToolServerConflictError,
     ToolServerNotFoundError,
     UnauthenticatedError,
 )
@@ -69,6 +73,10 @@ def status_code_for_error(error: ApplicationError) -> int:
         return 404
     if isinstance(error, AgentNameConflictError):
         return 409
+    if isinstance(error, ToolServerConflictError):
+        return 409
+    if isinstance(error, ToolServerConfigurationError):
+        return 422
     if isinstance(error, ToolServerNotFoundError | ToolNotFoundError):
         return 404
     if isinstance(error, ToolDisabledError):
@@ -79,6 +87,14 @@ def status_code_for_error(error: ApplicationError) -> int:
         return 409
     if isinstance(error, McpClientNotConfiguredError):
         return 500
+    if isinstance(error, McpTransportNotSupportedError):
+        return 409
+    if isinstance(error, McpToolListFailedError):
+        if error.code == "transport_not_supported_yet":
+            return 409
+        if error.code == "mcp_timeout":
+            return 504
+        return 502
     if isinstance(error, ApprovalNotFoundError):
         return 404
     if isinstance(

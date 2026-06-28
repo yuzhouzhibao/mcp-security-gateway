@@ -246,13 +246,13 @@ class ToolCallService:
                 arguments=request.arguments,
                 timeout_seconds=self._mcp_call_timeout_seconds,
             )
-        except McpUpstreamTimeoutError:
-            return self._mark_upstream_failed(tool_call, "upstream_timeout", "Upstream timed out")
-        except McpUpstreamError:
+        except McpUpstreamTimeoutError as error:
+            return self._mark_upstream_failed(tool_call, error.code, error.message)
+        except McpUpstreamError as error:
             return self._mark_upstream_failed(
                 tool_call,
-                "upstream_failed",
-                "Upstream tool call failed",
+                error.code,
+                error.message,
             )
 
         tool_call.status = ToolCallStatus.SUCCEEDED
@@ -323,19 +323,19 @@ class ToolCallService:
                 arguments=arguments,
                 timeout_seconds=self._mcp_call_timeout_seconds,
             )
-        except McpUpstreamTimeoutError:
+        except McpUpstreamTimeoutError as error:
             return self._approval_execution_failed(
                 approval,
                 tool_call,
-                "upstream_timeout",
-                "Upstream timed out",
+                error.code,
+                error.message,
             )
-        except McpUpstreamError:
+        except McpUpstreamError as error:
             return self._approval_execution_failed(
                 approval,
                 tool_call,
-                "upstream_failed",
-                "Upstream tool call failed",
+                error.code,
+                error.message,
             )
 
         tool_call.status = ToolCallStatus.SUCCEEDED

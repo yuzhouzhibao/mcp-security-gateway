@@ -10,6 +10,7 @@ from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from mcp_security_gateway.api.dependencies import get_db_session
+from mcp_security_gateway.application.ports.mcp_client import McpToolMetadata
 from mcp_security_gateway.domain.enums import (
     ActionType,
     EntityStatus,
@@ -350,7 +351,7 @@ def test_upstream_failure_returns_failed_status(
     assert body["error"]["code"] == "upstream_failed"
 
 
-def test_production_default_missing_mcp_client_returns_failed_not_succeeded(
+def test_production_default_streamable_http_returns_explicit_failure(
     test_settings: Settings,
     tool_call_api_session: Session,
 ) -> None:
@@ -374,7 +375,7 @@ def test_production_default_missing_mcp_client_returns_failed_not_succeeded(
     body = response.json()
     assert response.status_code == 200
     assert body["status"] == "failed"
-    assert body["error"]["code"] == "mcp_client_not_configured"
+    assert body["error"]["code"] == "transport_not_supported_yet"
 
 
 def test_idempotency_repeat_success_and_argument_mismatch_conflict(
@@ -641,3 +642,153 @@ def test_approval_response_does_not_include_execution_payload(
 
     assert "arguments_payload" not in listed
     assert "arguments_payload" not in approved
+
+
+def test_tool_registry_admin_endpoints_require_admin_auth(client: TestClient) -> None:
+    tenant_id = str(uuid4())
+    create_server = client.post(
+        "/v1/admin/tool-servers",
+        json={
+            "tenant_id": tenant_id,
+            "server_id": "calculator-local",
+            "name": "Calculator",
+            "transport_type": "stdio",
+            "command": "python",
+            "args": ["server.py"],
+        },
+    )
+    list_servers = client.get(f"/v1/admin/tool-servers?tenant_id={tenant_id}")
+    refresh = client.post(
+        "/v1/admin/tool-servers/calculator-local/refresh-tools",
+        json={"tenant_id": tenant_id},
+    )
+    list_definitions = client.get(
+        f"/v1/admin/tool-definitions?tenant_id={tenant_id}&server_id=calculator-local"
+    )
+    update_definition = client.patch(
+        f"/v1/admin/tool-definitions/{uuid4()}",
+        json={"status": "active"},
+    )
+
+    assert create_server.status_code == 401
+    assert list_servers.status_code == 401
+    assert refresh.status_code == 401
+    assert list_definitions.status_code == 401
+    assert update_definition.status_code == 401
+
+
+def test_create_stdio_tool_server_requires_command(
+    client: TestClient,
+    tool_call_api_session: Session,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-tool-server-command")
+
+    response = client.post(
+        "/v1/admin/tool-servers",
+        json={
+            "tenant_id": str(tenant.id),
+            "server_id": "calculator-local",
+            "name": "Calculator",
+            "transport_type": "stdio",
+            "args": ["server.py"],
+        },
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "tool_server_configuration_invalid"
+
+
+def test_tool_server_response_omits_env_secret(
+    client: TestClient,
+    tool_call_api_session: Session,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-tool-server-env")
+    secret_value = "test-env-secret"
+
+    response = client.post(
+        "/v1/admin/tool-servers",
+        json={
+            "tenant_id": str(tenant.id),
+            "server_id": "calculator-local",
+            "name": "Calculator",
+            "transport_type": "stdio",
+            "command": "python",
+            "args": ["server.py"],
+            "env": {"SECRET": secret_value},
+        },
+        headers=admin_headers(),
+    )
+    listed = client.get(
+        f"/v1/admin/tool-servers?tenant_id={tenant.id}",
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 201
+    assert "env" not in response.json()
+    assert listed.status_code == 200
+    assert "env" not in listed.json()["items"][0]
+    assert secret_value not in response.text
+    assert secret_value not in listed.text
+
+
+def test_refresh_and_classify_discovered_tools(
+    client: TestClient,
+    tool_call_api_session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-tool-refresh")
+    mcp_client.set_tools(
+        [
+            McpToolMetadata(
+                name="add",
+                description="Add numbers",
+                input_schema={
+                    "type": "object",
+                    "required": ["a", "b"],
+                    "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                },
+            )
+        ]
+    )
+    created = client.post(
+        "/v1/admin/tool-servers",
+        json={
+            "tenant_id": str(tenant.id),
+            "server_id": "calculator-local",
+            "name": "Calculator",
+            "transport_type": "stdio",
+            "command": "python",
+            "args": ["server.py"],
+            "env": {"GITHUB_TOKEN": "registry-secret"},
+        },
+        headers=admin_headers(),
+    )
+    refreshed = client.post(
+        "/v1/admin/tool-servers/calculator-local/refresh-tools",
+        json={"tenant_id": str(tenant.id)},
+        headers=admin_headers(),
+    )
+    discovered = refreshed.json()["items"][0]
+    updated = client.patch(
+        f"/v1/admin/tool-definitions/{discovered['id']}",
+        json={"risk_level": "low", "action_type": "read", "status": "active"},
+        headers=admin_headers(),
+    )
+    listed = client.get(
+        f"/v1/admin/tool-definitions?tenant_id={tenant.id}&server_id=calculator-local",
+        headers=admin_headers(),
+    )
+
+    assert created.status_code == 201
+    assert refreshed.status_code == 200
+    assert discovered["risk_level"] == "critical"
+    assert discovered["action_type"] == "privileged"
+    assert discovered["status"] == "disabled"
+    assert updated.status_code == 200
+    assert updated.json()["risk_level"] == "low"
+    assert updated.json()["action_type"] == "read"
+    assert updated.json()["status"] == "active"
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["tool_name"] == "add"
+    assert "registry-secret" not in listed.text

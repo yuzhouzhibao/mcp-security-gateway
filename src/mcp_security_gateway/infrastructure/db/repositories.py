@@ -128,6 +128,21 @@ class SQLAlchemyToolDefinitionRepository:
             )
         )
 
+    def list_by_server(self, tenant_id: UUID, server_id: UUID) -> Sequence[ToolDefinitionModel]:
+        return list(
+            self._session.scalars(
+                select(ToolDefinitionModel).where(
+                    ToolDefinitionModel.tenant_id == tenant_id,
+                    ToolDefinitionModel.server_id == server_id,
+                )
+            ).all()
+        )
+
+    def update(self, definition: ToolDefinitionModel) -> ToolDefinitionModel:
+        self._session.add(definition)
+        self._session.flush()
+        return definition
+
 
 class SQLAlchemyPolicyRepository:
     def __init__(self, session: Session) -> None:

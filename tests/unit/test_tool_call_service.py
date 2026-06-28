@@ -422,6 +422,23 @@ async def test_upstream_failure_and_timeout_are_failed_not_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_call_result_is_error_maps_to_failed_tool_call() -> None:
+    svc, tool_calls, _, audit, client = service(
+        mcp_client=TestOnlyMcpClient(failure="mcp_tool_call_failed")
+    )
+
+    result = await svc.call_tool(agent(), request())
+
+    assert result.status == ToolCallStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == "mcp_tool_call_failed"
+    assert tool_calls.created[-1].status == ToolCallStatus.FAILED
+    assert audit.events[-1].status == "failed"
+    assert audit.events[-1].error_code == "mcp_tool_call_failed"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_missing_mcp_client_writes_failed_tool_call_and_audit_without_success() -> None:
     svc, tool_calls, _, audit, client = service(configured_mcp_client=False)
 
@@ -568,7 +585,7 @@ def test_test_only_mcp_client_is_not_selected_by_production_settings(
 ) -> None:
     app = create_app(test_settings)
 
-    assert not hasattr(app.state, "mcp_client")
+    assert type(app.state.mcp_client).__name__ == "StdioMcpClient"
 
 
 @pytest.mark.asyncio

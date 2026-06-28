@@ -8,6 +8,7 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from mcp_security_gateway.application.ports.mcp_client import McpClient, McpToolMetadata
 from mcp_security_gateway.application.services.agent_service import AgentDTO, AgentService
 from mcp_security_gateway.application.services.approval_service import ApprovalService
 from mcp_security_gateway.application.services.audit_service import AuditService
@@ -15,11 +16,15 @@ from mcp_security_gateway.application.services.errors import (
     AgentDisabledError,
     AgentNameConflictError,
     ApprovalAlreadyProcessedError,
+    ToolDisabledError,
 )
 from mcp_security_gateway.application.services.policy_engine import PolicyService
 from mcp_security_gateway.application.services.tool_call_service import (
     ToolCallRequest,
     ToolCallService,
+)
+from mcp_security_gateway.application.services.tool_registry_service import (
+    ToolRegistryService,
 )
 from mcp_security_gateway.domain.enums import (
     ActionType,
@@ -136,7 +141,7 @@ def create_tool_server(session: Session, tenant_id: UUID) -> ToolServerModel:
         transport_type=TransportType.STDIO,
         endpoint_url=None,
         command="mcp-filesystem",
-        args={"mode": "readonly"},
+        args=["--readonly"],
         env={"PROFILE": "test"},
         status=EntityStatus.ACTIVE,
     )
@@ -204,7 +209,7 @@ def create_tool_definition(
 
 def tool_call_service(
     session: Session,
-    mcp_client: TestOnlyMcpClient,
+    mcp_client: McpClient,
 ) -> ToolCallService:
     approval_repository = SQLAlchemyApprovalRequestRepository(session)
     audit_service = AuditService(SQLAlchemyAuditEventRepository(session))
@@ -1092,3 +1097,229 @@ async def test_approval_audit_never_stores_payload_secret(db_session: Session) -
     stored_tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
     assert stored_tool_call is not None
     assert stored_tool_call.arguments_payload is None
+
+
+def registry_service(session: Session, client: TestOnlyMcpClient) -> ToolRegistryService:
+    return ToolRegistryService(
+        tenant_repository=SQLAlchemyTenantRepository(session),
+        tool_server_repository=SQLAlchemyToolServerRepository(session),
+        tool_definition_repository=SQLAlchemyToolDefinitionRepository(session),
+        mcp_client=client,
+        mcp_call_timeout_seconds=5,
+    )
+
+
+def test_create_and_list_tool_server_persisted(db_session: Session) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-server")
+    server = create_tool_server(db_session, tenant.id)
+
+    servers = SQLAlchemyToolServerRepository(db_session).list_by_tenant(tenant.id)
+
+    assert servers == [server]
+    assert servers[0].args == ["--readonly"]
+
+
+@pytest.mark.asyncio
+async def test_registry_discovery_upserts_definitions_and_updates_schema_hash(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-upsert")
+    create_tool_server(db_session, tenant.id)
+    client = TestOnlyMcpClient(
+        tools=[
+            McpToolMetadata(
+                name="read_file",
+                description="Read file",
+                input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+            )
+        ]
+    )
+    service = registry_service(db_session, client)
+
+    first = await service.refresh_tools(tenant_id=tenant.id, server_id="filesystem")
+    first_hash = first[0].schema_hash
+    client.set_tools(
+        [
+            McpToolMetadata(
+                name="read_file",
+                description="Read file v2",
+                input_schema={"type": "object", "properties": {"path": {"minLength": 1}}},
+            )
+        ]
+    )
+    second = await service.refresh_tools(tenant_id=tenant.id, server_id="filesystem")
+
+    assert len(SQLAlchemyToolDefinitionRepository(db_session).list_by_tenant(tenant.id)) == 1
+    assert second[0].schema_hash != first_hash
+    assert second[0].description == "Read file v2"
+
+
+@pytest.mark.asyncio
+async def test_registry_discovery_does_not_override_manual_classification(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-classification")
+    create_tool_server(db_session, tenant.id)
+    client = TestOnlyMcpClient(
+        tools=[
+            McpToolMetadata(
+                name="read_file",
+                description="Read file",
+                input_schema={"type": "object"},
+            )
+        ]
+    )
+    service = registry_service(db_session, client)
+    discovered = (await service.refresh_tools(tenant_id=tenant.id, server_id="filesystem"))[0]
+    discovered.risk_level = RiskLevel.LOW
+    discovered.action_type = ActionType.READ
+    discovered.status = EntityStatus.ACTIVE
+    SQLAlchemyToolDefinitionRepository(db_session).update(discovered)
+
+    refreshed = await service.refresh_tools(tenant_id=tenant.id, server_id="filesystem")
+
+    assert refreshed[0].risk_level == RiskLevel.LOW
+    assert refreshed[0].action_type == ActionType.READ
+    assert refreshed[0].status == EntityStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_registry_discovery_failure_does_not_upsert_or_override_manual_classification(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-discovery-failure")
+    server = create_tool_server(db_session, tenant.id)
+    definition = create_tool_definition(db_session, tenant.id, server.id)
+    definition.risk_level = RiskLevel.LOW
+    definition.action_type = ActionType.READ
+    definition.status = EntityStatus.ACTIVE
+    client = TestOnlyMcpClient(failure="failed")
+
+    from mcp_security_gateway.application.services.errors import McpToolListFailedError
+
+    with pytest.raises(McpToolListFailedError) as captured:
+        await registry_service(db_session, client).refresh_tools(
+            tenant_id=tenant.id,
+            server_id="filesystem",
+        )
+
+    stored = SQLAlchemyToolDefinitionRepository(db_session).get_by_id(definition.id)
+    assert captured.value.code == "mcp_tool_list_failed"
+    assert stored is not None
+    assert stored.risk_level == RiskLevel.LOW
+    assert stored.action_type == ActionType.READ
+    assert stored.status == EntityStatus.ACTIVE
+    assert len(SQLAlchemyToolDefinitionRepository(db_session).list_by_tenant(tenant.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_discovered_tool_cannot_be_called_by_gateway(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-disabled-tool")
+    agent_model = create_agent(db_session, tenant.id)
+    create_tool_server(db_session, tenant.id)
+    client = TestOnlyMcpClient(
+        tools=[
+            McpToolMetadata(
+                name="read_file",
+                description="Read file",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            )
+        ]
+    )
+    await registry_service(db_session, client).refresh_tools(
+        tenant_id=tenant.id,
+        server_id="filesystem",
+    )
+
+    with pytest.raises(ToolDisabledError):
+        await tool_call_service(db_session, client).call_tool(
+            agent_dto(agent_model),
+            service_request(),
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_active_classified_tool_can_be_called_with_injected_client(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-registry-active-tool")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    definition = create_tool_definition(db_session, tenant.id, server.id)
+    definition.risk_level = RiskLevel.LOW
+    definition.action_type = ActionType.READ
+    definition.status = EntityStatus.ACTIVE
+    client = TestOnlyMcpClient(result={"ok": True})
+
+    result = await tool_call_service(db_session, client).call_tool(
+        agent_dto(agent_model),
+        service_request(),
+    )
+
+    assert result.status == ToolCallStatus.SUCCEEDED
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_call_returns_transport_not_supported_and_audit_failed(
+    db_session: Session,
+) -> None:
+    from mcp_security_gateway.infrastructure.mcp.stdio_client import StdioMcpClient
+
+    tenant = create_tenant(db_session, "tenant-streamable-http")
+    agent_model = create_agent(db_session, tenant.id)
+    server = ToolServerModel(
+        tenant_id=tenant.id,
+        server_id="remote-main",
+        name="Remote",
+        transport_type=TransportType.STREAMABLE_HTTP,
+        endpoint_url="https://example.invalid/mcp",
+        command=None,
+        args=None,
+        env={"GITHUB_TOKEN": "streamable-secret"},
+        status=EntityStatus.ACTIVE,
+    )
+    SQLAlchemyToolServerRepository(db_session).create(server)
+    SQLAlchemyToolDefinitionRepository(db_session).create(
+        ToolDefinitionModel(
+            tenant_id=tenant.id,
+            server_id=server.id,
+            tool_name="read_file",
+            description="Read file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            risk_level=RiskLevel.LOW,
+            action_type=ActionType.READ,
+            resource_patterns=None,
+            status=EntityStatus.ACTIVE,
+            schema_hash="schema-streamable",
+        )
+    )
+
+    result = await tool_call_service(db_session, StdioMcpClient()).call_tool(
+        agent_dto(agent_model),
+        ToolCallRequest(
+            target_server="remote-main",
+            target_tool="read_file",
+            arguments={"path": "/workspace/example.txt"},
+            trace_id="trace-streamable",
+            idempotency_key=None,
+        ),
+    )
+
+    audit_event = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)[0]
+    assert result.status == ToolCallStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == "transport_not_supported_yet"
+    assert audit_event.error_code == "transport_not_supported_yet"
+    assert "streamable-secret" not in repr(audit_event)
