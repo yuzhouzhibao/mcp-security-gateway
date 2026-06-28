@@ -1,63 +1,105 @@
 # Security Model
 
-The security model for future phases is based on these principles:
+MCP Security Gateway is designed around explicit authorization, conservative defaults, and durable audit records.
 
-- Deny by default.
-- Fail closed when policy, identity, approval, or audit checks cannot be completed.
-- Do not write plaintext secrets to logs.
-- Admin APIs must be authenticated in a later phase before any privileged operation exists.
+## Trust Boundaries
 
-Phase 3 adds API key authentication and admin-protected agent management. It does not implement policy evaluation, approval APIs, audit APIs, MCP calls, or tool execution.
+- Agent boundary: agents authenticate with Agent API keys and can call only agent endpoints.
+- Admin boundary: operators authenticate with the deployment-level Admin API key and can manage agents, tool registry entries, and approvals.
+- MCP boundary: MCP servers are external processes reached through the MCP client port.
+- Database boundary: PostgreSQL stores identities, tool registry metadata, policy configuration, tool calls, approvals, and audit events.
+- Audit boundary: AuditEvent rows are append-only through repository interfaces.
 
-Repository code stores only redacted arguments and hashes for tool-call and audit-related records. API key material is represented only as `api_key_hash`; plaintext API keys are not modeled.
+## Authentication Model
 
-- Agent keys are generated from high-entropy random material and returned only in the create response.
-- Agent keys are stored only as HMAC-SHA256 hashes derived with `API_KEY_PEPPER`.
-- Admin API access uses `ADMIN_API_KEY_HASH` with the same pepper and is a deployment-level bootstrap credential.
-- Disabled agents are rejected before any agent endpoint response is returned.
-- Error responses must not include API keys, hashes, or peppers.
+Agent API keys are generated from high-entropy random material and returned once during agent creation. The database stores only HMAC-SHA256 hashes derived with `API_KEY_PEPPER`.
 
-Phase 4 adds Policy Engine evaluation:
+Admin API access uses `ADMIN_API_KEY_HASH` and `API_KEY_PEPPER`. The admin credential is deployment-level bootstrap authentication, not a user management system.
 
-- Deny by default when no explicit built-in or configured allow applies.
-- Fail closed for repository, parse, scanning, redaction, and hashing failures.
-- Non-overridable built-in rules for suspected secrets, critical tools, destructive non-admin calls, and high-risk approval run before configured policies.
-- Configured deny and require-approval policies are evaluated before configured allow policies.
-- Low-risk read-only tools are allowed only after configured deny and require-approval policies have had a chance to match.
-- Secret findings include only path, detector kind, and reason; they do not contain raw sensitive values.
-- Redacted arguments are recursive and use a fixed redaction marker.
-- Argument hashes are SHA-256 over canonical JSON from the original arguments.
+Disabled agents cannot authenticate. Admin and agent credentials are separate and are not interchangeable.
 
-Phase 5 connects Policy Engine to `POST /v1/tool-calls`:
+## Policy Evaluation Order
 
-- The route requires Agent API key authentication.
-- The service uses stored ToolDefinition risk level and action type, never request-supplied risk metadata.
-- Tool arguments are validated against the stored JSON Schema before policy evaluation can call upstream.
-- Deny and require-approval decisions do not call upstream.
-- Require-approval creates only a pending ApprovalRequest; review and execution APIs are not implemented.
-- Allowed calls use the MCP client port. A real MCP adapter is not implemented.
-- ToolCall and AuditEvent rows store redacted arguments and canonical hashes, not raw arguments.
-- Tool lookup failure, schema validation failure, deny, require-approval, success, and upstream failure append audit events.
-- Idempotency keys reuse existing failed results rather than automatically retrying them in the MVP.
+PolicyService evaluates in this order:
 
-Phase 6 adds approval execution:
+1. Secret detection deny.
+2. Critical risk deny.
+3. Destructive non-admin deny.
+4. High risk require approval.
+5. Configured policies by priority.
+6. Built-in low-risk read allow.
+7. Default deny.
 
-- Approval APIs require admin authentication.
-- ApprovalService uses conditional status updates so only a pending approval can become approved or denied.
-- Approve performs pending to approved, then ToolCallService executes the stored server-side execution payload and records executed or failed.
-- Deny performs pending to denied and never calls upstream.
-- Expired approvals become expired and do not call upstream; their ToolCall is marked denied with `approval_expired`.
-- Executed, denied, expired, and failed approvals are terminal. Failed approvals are not automatically retried.
-- Approved execution uses `tool_calls.arguments_payload`, never redacted arguments.
-- `arguments_payload` exists only while an approval is pending execution. It is cleared after executed, failed, denied, or expired approval outcomes.
-- `arguments_payload` is not returned by APIs and is not written to audit events or logs. The MVP stores this server-side payload as JSONB; production hardening should encrypt it with a managed key service.
+Configured deny and require-approval policies can override built-in low-risk read allow. Critical and secret denies cannot be overridden by configured allow policies.
 
-Phase 7A adds real MCP stdio integration and Tool Registry APIs:
+## Secret Detection And Redaction
 
-- Production app startup uses the real stdio MCP adapter, not the test-only client.
-- New ToolDefinitions discovered from MCP servers default to `critical`, `privileged`, and `disabled`.
-- Discovery refresh updates description, input schema, and schema hash, but it does not overwrite manual risk level, action type, or status classification.
-- Admins must explicitly classify and enable a tool before agents can call it.
-- ToolServer `env` values are stored for server execution but are not returned by Tool Registry API responses and are not written to audit events.
-- Streamable HTTP MCP transport returns `transport_not_supported_yet` in this phase.
-- MCP adapter failures are recorded as failed ToolCalls and AuditEvents; they are not reported as successful tool calls.
+Arguments are recursively scanned for secret-like key names and value patterns. Findings include path, detector kind, and reason, but not the raw secret value.
+
+AuditEvent rows and ToolCall redacted fields store redacted arguments and canonical argument hashes. Raw arguments are not written to audit events.
+
+## Audit Log Rules
+
+Audit events are written for:
+
+- Tool lookup failures.
+- Schema validation failures.
+- Policy deny.
+- Approval required.
+- MCP success.
+- MCP failure.
+- Approval approved, denied, expired, executed, and failed.
+
+Audit events must not contain API keys, peppers, ToolServer env values, or execution payloads.
+
+## Approval Execution Payload Retention
+
+Approval execution requires original tool arguments. The MVP stores those arguments in `tool_calls.arguments_payload` only while approval execution is pending.
+
+The payload is cleared after:
+
+- executed
+- failed
+- denied
+- expired
+
+The payload is not returned by APIs and is not written to audit events or logs. Production hardening should encrypt this field with a managed key service.
+
+## MCP Discovery Safety
+
+Newly discovered tools default to:
+
+- `risk_level = critical`
+- `action_type = privileged`
+- `status = disabled`
+
+Admins must explicitly classify and enable tools before agents can call them. Refresh updates description, input schema, and schema hash, but does not overwrite manual risk/action/status choices.
+
+ToolServer `env` values are used only for server execution and are not returned by API responses.
+
+## Failure Modes
+
+The system fails closed for:
+
+- Policy repository errors.
+- Policy parse errors.
+- Secret scanning errors.
+- Argument hash/redaction failures.
+- Argument schema validation failures.
+- Tool registry misses.
+- Disabled tools or servers.
+- MCP discovery failures.
+- MCP call failures.
+- Unsupported MCP transports.
+
+MCP tool call failures produce failed ToolCall and AuditEvent records. They are not reported as success.
+
+## Known Limitations
+
+- Streamable HTTP MCP transport is not implemented.
+- OAuth / SSO is not implemented.
+- UI dashboard is not implemented.
+- Redis-backed rate limiting is not implemented.
+- OpenTelemetry tracing is not implemented.
+- Audit Query API is not implemented.
+- Admin Policy API is not implemented.

@@ -1,139 +1,153 @@
 # MCP Security Gateway
 
-MCP Security Gateway is an open source Python service intended to become a security gateway for controlled access to MCP tools and servers.
+[![CI](https://github.com/yuzhouzhibao/mcp-security-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/yuzhouzhibao/mcp-security-gateway/actions/workflows/ci.yml)
 
-## MVP Goal
+MCP Security Gateway is a policy, approval, and audit gateway between AI agents and MCP tools.
 
-The MVP target is a gateway that applies explicit security policy before tool calls reach MCP servers.
+It is built for teams that want AI agents to use tools without giving those agents unchecked access to sensitive systems.
 
-## Current Phase
+## Why This Exists
 
-The project currently provides:
+AI agents can call tools quickly, repeatedly, and under prompt pressure. That creates real operational risk:
 
-- FastAPI application startup.
-- `GET /health`.
-- `GET /version`.
-- Pydantic settings.
-- Domain enums and data structures.
-- Agent API key authentication and deployment-level admin API key authentication.
-- Admin Agent management endpoints for creating, listing, fetching, and disabling agents.
-- Agent self-check endpoint at `GET /v1/agents/me`.
-- Policy Engine application service with deny by default and fail closed behavior.
-- Configured policy precedence where deny and require-approval can override built-in low-risk read allow.
-- Secret detection, recursive argument redaction, and canonical argument hashing.
-- Tool Call Gateway endpoint at `POST /v1/tool-calls`.
-- Tool call orchestration that authenticates agents, validates tool registry metadata and JSON Schema arguments, evaluates policy, records ToolCall rows, creates pending ApprovalRequest rows when required, and appends AuditEvent rows.
-- MCP calls through an application port only.
-- Idempotency reuses prior completed results, including failed results; the MVP does not automatically retry failed idempotent calls.
-- Admin approval endpoints for listing approvals, approving pending approvals, and denying pending approvals.
-- Approved requests execute the original server-side execution payload through the MCP client port.
-- Approval state transitions are guarded by conditional updates so repeated approval attempts do not execute upstream twice.
+- Agent tool calls can be hard to control once a key is issued.
+- Prompt injection can steer agents toward dangerous or unintended tool calls.
+- Tool arguments may contain secrets that should never enter audit logs or responses.
+- High-risk actions need human approval before execution.
+- After an incident, teams need durable records of what was requested, decided, approved, denied, and executed.
+
+## Implemented Today
+
+- Agent API key authentication.
+- Admin API key authentication.
+- Tool registry for MCP ToolServers and ToolDefinitions.
+- Policy Engine with deny by default and fail closed behavior.
+- Secret detection, recursive redaction, and canonical argument hashing.
+- Tool Call Gateway at `POST /v1/tool-calls`.
+- Approval flow for pending approvals, approve, deny, expiry, and approved execution.
+- AuditEvent persistence for gateway and approval paths.
 - Real MCP stdio adapter using the official MCP Python SDK.
-- Admin Tool Registry endpoints for registering ToolServers, refreshing discovered tools, listing ToolDefinitions, and updating ToolDefinition risk/action/status classification.
-- MCP tool discovery for stdio servers. Newly discovered tools default to `critical`, `privileged`, and `disabled`.
-- A local calculator MCP stdio example server under `examples/mcp_servers/calculator_server.py`.
-- SQLAlchemy ORM models and repository implementations.
-- Alembic initial migration.
-- Test, lint, type-check, Docker Compose, and CI infrastructure.
+- Example MCP calculator server.
+- PostgreSQL persistence with SQLAlchemy 2.x.
+- Alembic migrations.
+- Pytest, Ruff, mypy, Docker Compose, Makefile, and GitHub Actions CI.
 
-Audit query APIs, federated identity, and Streamable HTTP MCP transport are not implemented. Streamable HTTP servers return `transport_not_supported_yet` when used for discovery or calls. Test-only MCP clients are used only in tests and are not production adapters.
+## Not Implemented Yet
 
-## Local Development
+- Streamable HTTP MCP adapter.
+- OAuth / SSO.
+- UI dashboard.
+- Redis rate limiting.
+- OpenTelemetry tracing.
+- Admin Policy API.
+- Audit Query API.
 
-Install dependencies:
+## Quickstart
 
 ```powershell
+git clone https://github.com/yuzhouzhibao/mcp-security-gateway.git
+cd mcp-security-gateway
 uv sync
+cp .env.example .env
 ```
 
-Run the API locally:
+Edit `.env` before running the service. Use local-only placeholder values for development and do not commit `.env`.
 
-```powershell
-$env:APP_NAME = "MCP Security Gateway"
-$env:APP_ENV = "local"
-$env:LOG_LEVEL = "INFO"
-$env:DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway"
-$env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
-$env:API_KEY_PEPPER = "replace-with-local-development-pepper"
-$env:ADMIN_API_KEY_HASH = "replace-with-hmac-sha256-admin-key-hash"
-$env:APPROVAL_REQUEST_TTL_SECONDS = "900"
-$env:MCP_CALL_TIMEOUT_SECONDS = "10"
-uv run uvicorn mcp_security_gateway.main:app --reload
-```
-
-Run tests:
-
-```powershell
-uv run pytest
-uv run pytest -m integration
-```
-
-Run lint and formatting checks:
-
-```powershell
-uv run ruff check .
-uv run ruff format --check .
-```
-
-Run type checks:
-
-```powershell
-uv run mypy src tests
-```
-
-Validate Docker Compose:
-
-```powershell
-docker compose config
-```
-
-Start local services:
-
-```powershell
-docker compose up --build
-```
-
-Start PostgreSQL for database work:
+Start PostgreSQL with Docker:
 
 ```powershell
 docker compose up -d postgres
 ```
 
-Run migrations:
+If Docker is not available, run PostgreSQL yourself and set `DATABASE_URL` in `.env`.
+
+Run migrations and start the API:
 
 ```powershell
-$env:DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway"
-$env:API_KEY_PEPPER = "replace-with-local-development-pepper"
-$env:ADMIN_API_KEY_HASH = "replace-with-hmac-sha256-admin-key-hash"
-$env:APPROVAL_REQUEST_TTL_SECONDS = "900"
-$env:MCP_CALL_TIMEOUT_SECONDS = "10"
+uv run alembic upgrade head
+uv run uvicorn mcp_security_gateway.main:app --reload
+```
+
+Health checks:
+
+```powershell
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/version
+```
+
+## Demo Flow
+
+There is no Tenant Admin API yet. Use the demo seed helper to create a tenant and an agent:
+
+```powershell
+uv run python examples/demo_seed.py
+```
+
+The helper prints `TENANT_ID`, `AGENT_ID`, and a one-time `AGENT_API_KEY`. It does not print `API_KEY_PEPPER` or `ADMIN_API_KEY_HASH`.
+
+Then use the real API path:
+
+1. Register the calculator MCP stdio server with `POST /v1/admin/tool-servers`.
+2. Refresh discovered tools with `POST /v1/admin/tool-servers/{server_id}/refresh-tools`.
+3. Confirm discovered tools default to `critical`, `privileged`, and `disabled`.
+4. Classify `add` as `low`, `read`, and `active`.
+5. Call `POST /v1/tool-calls` as the agent.
+6. Classify another tool as high risk to see `pending_approval`.
+7. Approve it through `POST /v1/admin/approvals/{approval_id}/approve`.
+8. Inspect database AuditEvent rows if you want to verify recorded decisions. There is no Audit Query API yet.
+
+Full commands are in [docs/demo.md](docs/demo.md). API examples are in [docs/api-examples.md](docs/api-examples.md).
+
+## Security Posture
+
+- Deny by default.
+- Fail closed on policy, discovery, validation, and MCP adapter failures.
+- Newly discovered tools are disabled, critical, and privileged until an admin classifies them.
+- ToolServer `env` values are not returned in API responses.
+- Raw tool arguments are not written to AuditEvent rows.
+- Approval execution payloads are stored only while approval execution is pending, then cleared.
+- Failed idempotent calls are not retried automatically in the MVP.
+- The test-only MCP client lives under `tests/` and is not selected by production app startup.
+
+Read more in [docs/security-model.md](docs/security-model.md) and [docs/threat-model.md](docs/threat-model.md).
+
+## Developer Commands
+
+```powershell
+make install
+make lint
+make format-check
+make typecheck
+make test
+make test-integration
+make test-e2e
+make compose-config
+make migrate
+make check
+```
+
+Without `make`, use:
+
+```powershell
+uv sync
+uv run pytest
+uv run pytest -m integration
+uv run pytest -m e2e
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src tests
+docker compose config
 uv run alembic upgrade head
 ```
 
-Approval execution payload:
+Integration and e2e tests require an explicit PostgreSQL `TEST_DATABASE_URL`.
 
-The MVP stores original tool arguments in `tool_calls.arguments_payload` only while an approval is pending execution. The payload is cleared after executed, failed, denied, or expired approval outcomes. It is not returned by APIs and is not written to audit events. Production hardening should encrypt this payload with a managed key service.
+## Documentation
 
-Run integration tests with an explicit PostgreSQL test database URL:
-
-```powershell
-$env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
-uv run pytest -m integration
-```
-
-Integration tests create isolated PostgreSQL schemas per test session so separate test processes do not share tables.
-
-Run the real stdio MCP e2e test:
-
-```powershell
-$env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
-uv run pytest -m e2e
-```
-
-Tool Registry demo outline:
-
-1. Create an admin-authenticated agent with `POST /v1/admin/agents`.
-2. Register `examples/mcp_servers/calculator_server.py` as a stdio ToolServer with `POST /v1/admin/tool-servers`.
-3. Discover tools with `POST /v1/admin/tool-servers/{server_id}/refresh-tools`.
-4. Classify a discovered tool, for example `add`, with `PATCH /v1/admin/tool-definitions/{tool_definition_id}`.
-5. Call it through `POST /v1/tool-calls` as an authenticated agent.
+- [Architecture](docs/architecture.md)
+- [Security Model](docs/security-model.md)
+- [Threat Model](docs/threat-model.md)
+- [API Examples](docs/api-examples.md)
+- [Demo](docs/demo.md)
+- [Development](docs/development.md)
+- [Roadmap](docs/roadmap.md)
