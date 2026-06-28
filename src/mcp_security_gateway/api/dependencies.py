@@ -5,7 +5,9 @@ from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session, sessionmaker
 
 from mcp_security_gateway.api.errors import APIError
+from mcp_security_gateway.application.ports.mcp_client import McpClient
 from mcp_security_gateway.application.services.agent_service import AgentDTO, AgentService
+from mcp_security_gateway.application.services.errors import McpClientNotConfiguredError
 from mcp_security_gateway.infrastructure.auth.api_keys import verify_api_key_hash
 from mcp_security_gateway.infrastructure.db.repositories import (
     SQLAlchemyAgentRepository,
@@ -60,3 +62,10 @@ def require_agent(
     token = extract_bearer_token(authorization)
     service = get_agent_service(session, settings)
     return service.authenticate_agent_by_api_key(token)
+
+
+def get_mcp_client(request: Request) -> McpClient:
+    client = getattr(request.app.state, "mcp_client", None)
+    if client is None:
+        raise McpClientNotConfiguredError()
+    return cast(McpClient, client)

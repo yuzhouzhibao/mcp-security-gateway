@@ -37,3 +37,53 @@ class AgentDisabledError(ApplicationError):
 class UnauthenticatedError(ApplicationError):
     def __init__(self) -> None:
         super().__init__("unauthenticated", "Authentication is required")
+
+
+class ToolServerNotFoundError(ApplicationError):
+    def __init__(self, trace_id: str | None = None) -> None:
+        super().__init__(
+            "tool_server_not_found",
+            "Tool server not found",
+            {"trace_id": trace_id} if trace_id is not None else None,
+        )
+
+
+class ToolNotFoundError(ApplicationError):
+    def __init__(self, trace_id: str | None = None) -> None:
+        super().__init__(
+            "tool_not_found",
+            "Tool not found",
+            {"trace_id": trace_id} if trace_id is not None else None,
+        )
+
+
+class ToolDisabledError(ApplicationError):
+    def __init__(self, trace_id: str | None = None) -> None:
+        super().__init__(
+            "tool_disabled",
+            "Tool is disabled",
+            {"trace_id": trace_id} if trace_id is not None else None,
+        )
+
+
+class ArgumentSchemaInvalidError(ApplicationError):
+    def __init__(self, trace_id: str | None = None) -> None:
+        super().__init__(
+            "argument_schema_invalid",
+            "Tool arguments do not match input schema",
+            {"trace_id": trace_id} if trace_id is not None else None,
+        )
+
+
+class IdempotencyConflictError(ApplicationError):
+    def __init__(self, trace_id: str | None = None) -> None:
+        super().__init__(
+            "idempotency_conflict",
+            "Idempotency key conflicts with an in-flight or different request",
+            {"trace_id": trace_id} if trace_id is not None else None,
+        )
+
+
+class McpClientNotConfiguredError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("mcp_client_not_configured", "MCP client is not configured")

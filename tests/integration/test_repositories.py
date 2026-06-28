@@ -8,12 +8,18 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from mcp_security_gateway.application.services.agent_service import AgentService
+from mcp_security_gateway.application.services.agent_service import AgentDTO, AgentService
+from mcp_security_gateway.application.services.approval_service import ApprovalService
+from mcp_security_gateway.application.services.audit_service import AuditService
 from mcp_security_gateway.application.services.errors import (
     AgentDisabledError,
     AgentNameConflictError,
 )
 from mcp_security_gateway.application.services.policy_engine import PolicyService
+from mcp_security_gateway.application.services.tool_call_service import (
+    ToolCallRequest,
+    ToolCallService,
+)
 from mcp_security_gateway.domain.enums import (
     ActionType,
     AgentRole,
@@ -46,6 +52,7 @@ from mcp_security_gateway.infrastructure.db.repositories import (
     SQLAlchemyToolDefinitionRepository,
     SQLAlchemyToolServerRepository,
 )
+from tests.fakes.mcp_client import TestOnlyMcpClient
 
 pytestmark = pytest.mark.integration
 
@@ -160,6 +167,78 @@ def create_tool_call(
     )
     SQLAlchemyToolCallRepository(session).create(tool_call)
     return tool_call
+
+
+def create_tool_definition(
+    session: Session,
+    tenant_id: UUID,
+    server_id: UUID,
+    *,
+    risk_level: RiskLevel = RiskLevel.LOW,
+    action_type: ActionType = ActionType.READ,
+    schema: dict[str, object] | None = None,
+) -> ToolDefinitionModel:
+    definition = ToolDefinitionModel(
+        tenant_id=tenant_id,
+        server_id=server_id,
+        tool_name="read_file",
+        description="Read file",
+        input_schema=schema
+        or {
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        risk_level=risk_level,
+        action_type=action_type,
+        resource_patterns=None,
+        status=EntityStatus.ACTIVE,
+        schema_hash=f"schema-{risk_level.value}-{action_type.value}",
+    )
+    SQLAlchemyToolDefinitionRepository(session).create(definition)
+    return definition
+
+
+def tool_call_service(
+    session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> ToolCallService:
+    approval_repository = SQLAlchemyApprovalRequestRepository(session)
+    return ToolCallService(
+        tool_server_repository=SQLAlchemyToolServerRepository(session),
+        tool_definition_repository=SQLAlchemyToolDefinitionRepository(session),
+        tool_call_repository=SQLAlchemyToolCallRepository(session),
+        approval_repository=approval_repository,
+        policy_repository=SQLAlchemyPolicyRepository(session),
+        audit_service=AuditService(SQLAlchemyAuditEventRepository(session)),
+        approval_service=ApprovalService(approval_repository, 900),
+        mcp_client=mcp_client,
+        mcp_call_timeout_seconds=5,
+    )
+
+
+def agent_dto(agent_model: AgentModel) -> AgentDTO:
+    return AgentDTO(
+        id=agent_model.id,
+        tenant_id=agent_model.tenant_id,
+        name=agent_model.name,
+        role=AgentRole(agent_model.role),
+        status=EntityStatus(agent_model.status),
+    )
+
+
+def service_request(
+    idempotency_key: str | None = None,
+    arguments: dict[str, object] | None = None,
+) -> ToolCallRequest:
+    return ToolCallRequest(
+        target_server="filesystem",
+        target_tool="read_file",
+        arguments=arguments or {"path": "/workspace/example.txt"},
+        trace_id="trace-service",
+        idempotency_key=idempotency_key,
+    )
 
 
 def test_create_tenant_and_agent(db_session: Session) -> None:
@@ -600,3 +679,172 @@ def test_configured_deny_overrides_builtin_low_risk_read_allow_from_database(
 
     assert result.decision == PolicyEffect.DENY
     assert result.matched_policy_id == policy_model.id
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_success_creates_tool_call_and_audit(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-gateway-success")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(db_session, tenant.id, server.id)
+    client = TestOnlyMcpClient(result={"content": "ok"})
+
+    result = await tool_call_service(db_session, client).call_tool(
+        agent_dto(agent_model),
+        service_request(),
+    )
+
+    tool_calls = SQLAlchemyToolCallRepository(db_session).list_by_tenant(tenant.id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ToolCallStatus.SUCCEEDED
+    assert len(client.calls) == 1
+    assert len(tool_calls) == 1
+    assert tool_calls[0].status == ToolCallStatus.SUCCEEDED
+    assert len(audit_events) == 1
+    assert audit_events[0].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_deny_creates_tool_call_and_audit(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-gateway-deny")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(db_session, tenant.id, server.id, risk_level=RiskLevel.CRITICAL)
+    client = TestOnlyMcpClient()
+
+    result = await tool_call_service(db_session, client).call_tool(
+        agent_dto(agent_model),
+        service_request(),
+    )
+
+    tool_calls = SQLAlchemyToolCallRepository(db_session).list_by_tenant(tenant.id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ToolCallStatus.DENIED
+    assert client.calls == []
+    assert len(tool_calls) == 1
+    assert tool_calls[0].status == ToolCallStatus.DENIED
+    assert len(audit_events) == 1
+    assert audit_events[0].status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_pending_approval_creates_rows(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-gateway-approval")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(db_session, tenant.id, server.id, risk_level=RiskLevel.HIGH)
+    client = TestOnlyMcpClient()
+
+    result = await tool_call_service(db_session, client).call_tool(
+        agent_dto(agent_model),
+        service_request(),
+    )
+
+    tool_calls = SQLAlchemyToolCallRepository(db_session).list_by_tenant(tenant.id)
+    approvals = SQLAlchemyApprovalRequestRepository(db_session).list_by_tenant(tenant.id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ToolCallStatus.PENDING_APPROVAL
+    assert result.approval_id is not None
+    assert client.calls == []
+    assert len(tool_calls) == 1
+    assert tool_calls[0].approval_id == result.approval_id
+    assert len(approvals) == 1
+    assert approvals[0].status == ApprovalStatus.PENDING
+    assert len(audit_events) == 1
+    assert audit_events[0].approval_id == result.approval_id
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_audits_schema_invalid_and_tool_not_found(
+    db_session: Session,
+) -> None:
+    from mcp_security_gateway.application.services.errors import (
+        ArgumentSchemaInvalidError,
+        ToolNotFoundError,
+    )
+
+    tenant = create_tenant(db_session, "tenant-gateway-failures")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(db_session, tenant.id, server.id)
+    client = TestOnlyMcpClient()
+    service = tool_call_service(db_session, client)
+
+    with pytest.raises(ArgumentSchemaInvalidError):
+        await service.call_tool(agent_dto(agent_model), service_request(arguments={"path": 123}))
+    with pytest.raises(ToolNotFoundError):
+        await service.call_tool(
+            agent_dto(agent_model),
+            ToolCallRequest(
+                target_server="filesystem",
+                target_tool="missing_tool",
+                arguments={"path": "/workspace/example.txt"},
+                trace_id="trace-missing-tool",
+                idempotency_key=None,
+            ),
+        )
+
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert [event.error_code for event in audit_events] == [
+        "argument_schema_invalid",
+        "tool_not_found",
+    ]
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_idempotency_reuses_success_and_avoids_duplicate_upstream(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-gateway-idempotency")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(db_session, tenant.id, server.id)
+    client = TestOnlyMcpClient()
+    service = tool_call_service(db_session, client)
+
+    first = await service.call_tool(agent_dto(agent_model), service_request("idem-service"))
+    second = await service.call_tool(agent_dto(agent_model), service_request("idem-service"))
+
+    tool_calls = SQLAlchemyToolCallRepository(db_session).list_by_tenant(tenant.id)
+    assert first.tool_call_id == second.tool_call_id
+    assert len(tool_calls) == 1
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_call_gateway_raw_secret_not_stored_in_audit_or_tool_call(
+    db_session: Session,
+) -> None:
+    tenant = create_tenant(db_session, "tenant-gateway-secret")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(
+        db_session,
+        tenant.id,
+        server.id,
+        schema={
+            "type": "object",
+            "properties": {"authorization": {"type": "string"}},
+        },
+    )
+    secret_value = "Bearer integration-sensitive-value"
+
+    result = await tool_call_service(db_session, TestOnlyMcpClient()).call_tool(
+        agent_dto(agent_model),
+        service_request(arguments={"authorization": secret_value}),
+    )
+
+    tool_call = SQLAlchemyToolCallRepository(db_session).list_by_tenant(tenant.id)[0]
+    audit_event = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)[0]
+    assert result.status == ToolCallStatus.DENIED
+    assert secret_value not in repr(tool_call.arguments_redacted)
+    assert secret_value not in repr(audit_event.arguments_redacted)
+    assert tool_call.arguments_hash is not None
+    assert audit_event.arguments_hash is not None

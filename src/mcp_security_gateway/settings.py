@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL")
     api_key_pepper: str = Field(alias="API_KEY_PEPPER")
     admin_api_key_hash: str = Field(alias="ADMIN_API_KEY_HASH")
+    approval_request_ttl_seconds: int = Field(alias="APPROVAL_REQUEST_TTL_SECONDS", gt=0)
+    mcp_call_timeout_seconds: float = Field(alias="MCP_CALL_TIMEOUT_SECONDS", gt=0)
     test_database_url: str | None = Field(default=None, alias="TEST_DATABASE_URL")
 
     model_config = SettingsConfigDict(

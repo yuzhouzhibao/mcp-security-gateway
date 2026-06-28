@@ -4,6 +4,7 @@ from mcp_security_gateway.api.errors import install_error_handlers
 from mcp_security_gateway.api.routes.admin_agents import router as admin_agents_router
 from mcp_security_gateway.api.routes.agent_self import router as agent_self_router
 from mcp_security_gateway.api.routes.health import router as health_router
+from mcp_security_gateway.api.routes.tool_calls import router as tool_calls_router
 from mcp_security_gateway.infrastructure.db.session import (
     create_database_engine,
     create_session_factory,
@@ -22,6 +23,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(admin_agents_router)
     app.include_router(agent_self_router)
+    app.include_router(tool_calls_router)
     return app
 
 

@@ -9,7 +9,13 @@ from mcp_security_gateway.application.services.errors import (
     AgentNameConflictError,
     AgentNotFoundError,
     ApplicationError,
+    ArgumentSchemaInvalidError,
+    IdempotencyConflictError,
+    McpClientNotConfiguredError,
     TenantNotFoundError,
+    ToolDisabledError,
+    ToolNotFoundError,
+    ToolServerNotFoundError,
     UnauthenticatedError,
 )
 
@@ -32,14 +38,17 @@ def error_response(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> JSONResponse:
+    raw_details = details or {}
+    trace_id = raw_details.get("trace_id")
+    response_details = {key: value for key, value in raw_details.items() if key != "trace_id"}
     return JSONResponse(
         status_code=status_code,
         content={
             "error": {
                 "code": code,
                 "message": message,
-                "details": details or {},
-                "trace_id": None,
+                "details": response_details,
+                "trace_id": trace_id,
             }
         },
     )
@@ -54,6 +63,16 @@ def status_code_for_error(error: ApplicationError) -> int:
         return 404
     if isinstance(error, AgentNameConflictError):
         return 409
+    if isinstance(error, ToolServerNotFoundError | ToolNotFoundError):
+        return 404
+    if isinstance(error, ToolDisabledError):
+        return 409
+    if isinstance(error, ArgumentSchemaInvalidError):
+        return 422
+    if isinstance(error, IdempotencyConflictError):
+        return 409
+    if isinstance(error, McpClientNotConfiguredError):
+        return 500
     return 500
 
 

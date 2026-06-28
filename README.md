@@ -4,7 +4,7 @@ MCP Security Gateway is an open source Python service intended to become a secur
 
 ## MVP Goal
 
-The MVP target is a gateway that can enforce explicit security policy before tool calls reach MCP servers. That business functionality is not implemented yet.
+The MVP target is a gateway that enforces explicit security policy before tool calls reach MCP servers.
 
 ## Current Phase
 
@@ -21,11 +21,15 @@ The project currently provides:
 - Policy Engine application service with deny by default and fail closed behavior.
 - Configured policy precedence where deny and require-approval can override built-in low-risk read allow.
 - Secret detection, recursive argument redaction, and canonical argument hashing.
+- Tool Call Gateway endpoint at `POST /v1/tool-calls`.
+- Tool call orchestration that authenticates agents, validates tool registry metadata and JSON Schema arguments, evaluates policy, records ToolCall rows, creates pending ApprovalRequest rows when required, and appends AuditEvent rows.
+- MCP calls through an application port only.
+- Idempotency reuses prior completed results, including failed results; the MVP does not automatically retry failed idempotent calls.
 - SQLAlchemy ORM models and repository implementations.
 - Alembic initial migration.
 - Test, lint, type-check, Docker Compose, and CI infrastructure.
 
-Tool Call Gateway, approval APIs, audit APIs, tool execution, federated identity, and MCP adapters are not implemented. The Policy Engine is not yet wired to a tool-call API.
+Approval review APIs, audit query APIs, federated identity, real MCP adapters, and MCP discovery are not implemented. Test-only MCP clients are used only in tests and are not production adapters.
 
 ## Local Development
 
@@ -45,6 +49,8 @@ $env:DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localho
 $env:TEST_DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway_test"
 $env:API_KEY_PEPPER = "replace-with-local-development-pepper"
 $env:ADMIN_API_KEY_HASH = "replace-with-hmac-sha256-admin-key-hash"
+$env:APPROVAL_REQUEST_TTL_SECONDS = "900"
+$env:MCP_CALL_TIMEOUT_SECONDS = "10"
 uv run uvicorn mcp_security_gateway.main:app --reload
 ```
 
@@ -92,6 +98,8 @@ Run migrations:
 $env:DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway"
 $env:API_KEY_PEPPER = "replace-with-local-development-pepper"
 $env:ADMIN_API_KEY_HASH = "replace-with-hmac-sha256-admin-key-hash"
+$env:APPROVAL_REQUEST_TTL_SECONDS = "900"
+$env:MCP_CALL_TIMEOUT_SECONDS = "10"
 uv run alembic upgrade head
 ```
 

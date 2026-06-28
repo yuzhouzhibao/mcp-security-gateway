@@ -197,6 +197,11 @@ class SQLAlchemyToolCallRepository:
             )
         )
 
+    def update(self, tool_call: ToolCallModel) -> ToolCallModel:
+        self._session.add(tool_call)
+        self._session.flush()
+        return tool_call
+
 
 class SQLAlchemyApprovalRequestRepository:
     _terminal_statuses = frozenset(
@@ -224,6 +229,11 @@ class SQLAlchemyApprovalRequestRepository:
             self._session.scalars(
                 select(ApprovalRequestModel).where(ApprovalRequestModel.tenant_id == tenant_id)
             ).all()
+        )
+
+    def get_by_tool_call_id(self, tool_call_id: UUID) -> ApprovalRequestModel | None:
+        return self._session.scalar(
+            select(ApprovalRequestModel).where(ApprovalRequestModel.tool_call_id == tool_call_id)
         )
 
     def transition_status(

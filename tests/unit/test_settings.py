@@ -17,6 +17,8 @@ def test_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
         "DATABASE_URL",
         "postgresql+psycopg://env_user:env_secret@localhost:5432/env_gateway",
     )
+    monkeypatch.setenv("APPROVAL_REQUEST_TTL_SECONDS", "900")
+    monkeypatch.setenv("MCP_CALL_TIMEOUT_SECONDS", "5")
 
     settings = Settings()
 
@@ -28,6 +30,8 @@ def test_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
         == "postgresql+psycopg://env_user:env_secret@localhost:5432/env_gateway"
     )
     assert settings.api_key_pepper == "test-api-key-pepper"
+    assert settings.approval_request_ttl_seconds == 900
+    assert settings.mcp_call_timeout_seconds == 5
 
 
 def test_test_settings_do_not_depend_on_real_secret(test_settings: Settings) -> None:
@@ -47,6 +51,8 @@ def test_settings_missing_api_key_pepper_fails(monkeypatch: pytest.MonkeyPatch) 
         "ADMIN_API_KEY_HASH",
         "56126e97dc552ee7817798aeb5ea4926cc4d09cffdfcf8797f144255a638381c",
     )
+    monkeypatch.setenv("APPROVAL_REQUEST_TTL_SECONDS", "900")
+    monkeypatch.setenv("MCP_CALL_TIMEOUT_SECONDS", "5")
     monkeypatch.delenv("API_KEY_PEPPER", raising=False)
 
     with pytest.raises(ValidationError):
@@ -61,6 +67,8 @@ def test_settings_missing_admin_api_key_hash_fails(monkeypatch: pytest.MonkeyPat
         "DATABASE_URL", "postgresql+psycopg://env_user:env_secret@localhost:5432/env"
     )
     monkeypatch.setenv("API_KEY_PEPPER", "test-api-key-pepper")
+    monkeypatch.setenv("APPROVAL_REQUEST_TTL_SECONDS", "900")
+    monkeypatch.setenv("MCP_CALL_TIMEOUT_SECONDS", "5")
     monkeypatch.delenv("ADMIN_API_KEY_HASH", raising=False)
 
     with pytest.raises(ValidationError):

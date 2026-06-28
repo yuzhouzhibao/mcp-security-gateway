@@ -14,6 +14,8 @@ os.environ["API_KEY_PEPPER"] = "test-api-key-pepper"
 os.environ["ADMIN_API_KEY_HASH"] = (
     "56126e97dc552ee7817798aeb5ea4926cc4d09cffdfcf8797f144255a638381c"
 )
+os.environ["APPROVAL_REQUEST_TTL_SECONDS"] = "900"
+os.environ["MCP_CALL_TIMEOUT_SECONDS"] = "5"
 
 from mcp_security_gateway.main import create_app
 from mcp_security_gateway.settings import Settings
@@ -31,6 +33,8 @@ def test_settings() -> Settings:
             "ADMIN_API_KEY_HASH": (
                 "56126e97dc552ee7817798aeb5ea4926cc4d09cffdfcf8797f144255a638381c"
             ),
+            "APPROVAL_REQUEST_TTL_SECONDS": 900,
+            "MCP_CALL_TIMEOUT_SECONDS": 5,
         }
     )
 

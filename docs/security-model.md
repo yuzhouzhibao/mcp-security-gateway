@@ -28,4 +28,14 @@ Phase 4 adds Policy Engine evaluation:
 - Redacted arguments are recursive and use a fixed redaction marker.
 - Argument hashes are SHA-256 over canonical JSON from the original arguments.
 
-The Policy Engine is not yet connected to a Tool Call Gateway, approval execution, audit API, or MCP call path.
+Phase 5 connects Policy Engine to `POST /v1/tool-calls`:
+
+- The route requires Agent API key authentication.
+- The service uses stored ToolDefinition risk level and action type, never request-supplied risk metadata.
+- Tool arguments are validated against the stored JSON Schema before policy evaluation can call upstream.
+- Deny and require-approval decisions do not call upstream.
+- Require-approval creates only a pending ApprovalRequest; review and execution APIs are not implemented.
+- Allowed calls use the MCP client port. A real MCP adapter is not implemented.
+- ToolCall and AuditEvent rows store redacted arguments and canonical hashes, not raw arguments.
+- Tool lookup failure, schema validation failure, deny, require-approval, success, and upstream failure append audit events.
+- Idempotency keys reuse existing failed results rather than automatically retrying them in the MVP.

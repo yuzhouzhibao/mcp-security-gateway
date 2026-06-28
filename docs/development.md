@@ -55,6 +55,8 @@ Run migrations:
 $env:DATABASE_URL = "postgresql+psycopg://mcp_gateway:mcp_gateway_secret@localhost:5432/mcp_security_gateway"
 $env:API_KEY_PEPPER = "replace-with-local-development-pepper"
 $env:ADMIN_API_KEY_HASH = "replace-with-hmac-sha256-admin-key-hash"
+$env:APPROVAL_REQUEST_TTL_SECONDS = "900"
+$env:MCP_CALL_TIMEOUT_SECONDS = "10"
 uv run alembic upgrade head
 ```
 
