@@ -68,3 +68,5 @@ uv run pytest -m integration
 ```
 
 `TEST_DATABASE_URL` must be explicit. Integration tests create isolated PostgreSQL schemas per test session and do not use a local file database substitute.
+
+Approval flow tests use the MCP client port with a test-only client under `tests/fakes`. The production app does not select that client by default.

@@ -1,11 +1,12 @@
 import os
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import cast
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from mcp_security_gateway.api.dependencies import get_db_session
@@ -17,9 +18,11 @@ from mcp_security_gateway.domain.enums import (
 )
 from mcp_security_gateway.infrastructure.db.base import Base
 from mcp_security_gateway.infrastructure.db.models import (
+    ApprovalRequestModel,
     TenantModel,
     ToolDefinitionModel,
     ToolServerModel,
+    utc_now,
 )
 from mcp_security_gateway.infrastructure.db.repositories import (
     SQLAlchemyTenantRepository,
@@ -459,3 +462,182 @@ def test_response_does_not_contain_sensitive_fields_or_raw_secret(
     assert "api_key" not in body_text
     assert "api_key_hash" not in body_text
     assert secret_value not in body_text
+
+
+def test_approval_admin_endpoints_require_admin_auth(
+    client: TestClient,
+    tool_call_api_session: Session,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-auth-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload(),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+    approval_id = pending["approval_id"]
+
+    listed = client.get("/v1/admin/approvals")
+    approved = client.post(
+        f"/v1/admin/approvals/{approval_id}/approve",
+        json={"review_reason": "Looks safe"},
+    )
+    denied = client.post(
+        f"/v1/admin/approvals/{approval_id}/deny",
+        json={"review_reason": "Too risky"},
+    )
+
+    assert listed.status_code == 401
+    assert approved.status_code == 401
+    assert denied.status_code == 401
+
+
+def test_list_pending_and_approve_executes_approved_tool_call(
+    client: TestClient,
+    tool_call_api_session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-execute-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload("approval-execute"),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+
+    listed = client.get(
+        f"/v1/admin/approvals?tenant_id={tenant.id}",
+        headers=admin_headers(),
+    )
+    approved = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/approve",
+        json={"review_reason": "Looks safe"},
+        headers=admin_headers(),
+    )
+
+    body = approved.json()
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == pending["approval_id"]
+    assert approved.status_code == 200
+    assert body["status"] == "executed"
+    assert body["tool_call_status"] == "succeeded"
+    assert body["result"] == {"ok": True}
+    assert len(mcp_client.calls) == 1
+
+
+def test_deny_pending_approval_does_not_call_mcp(
+    client: TestClient,
+    tool_call_api_session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-deny-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload("approval-deny"),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+
+    denied = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/deny",
+        json={"review_reason": "Too risky"},
+        headers=admin_headers(),
+    )
+
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "denied"
+    assert denied.json()["tool_call_status"] == "denied"
+    assert mcp_client.calls == []
+
+
+def test_approve_same_approval_twice_does_not_execute_twice(
+    client: TestClient,
+    tool_call_api_session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-double-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload("approval-double"),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+
+    first = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/approve",
+        json={"review_reason": "Looks safe"},
+        headers=admin_headers(),
+    )
+    second = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/approve",
+        json={"review_reason": "Again"},
+        headers=admin_headers(),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "approval_already_processed"
+    assert len(mcp_client.calls) == 1
+
+
+def test_approve_expired_approval_does_not_call_mcp(
+    client: TestClient,
+    tool_call_api_session: Session,
+    mcp_client: TestOnlyMcpClient,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-expired-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload("approval-expired"),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+    approval = tool_call_api_session.scalar(
+        select(ApprovalRequestModel).where(
+            ApprovalRequestModel.id == pending["approval_id"],
+        )
+    )
+    assert approval is not None
+    approval.expires_at = utc_now() - timedelta(seconds=1)
+    tool_call_api_session.commit()
+
+    approved = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/approve",
+        json={"review_reason": "Looks safe"},
+        headers=admin_headers(),
+    )
+
+    body = approved.json()
+    assert approved.status_code == 200
+    assert body["status"] == "expired"
+    assert body["error"]["code"] == "approval_expired"
+    assert mcp_client.calls == []
+
+
+def test_approval_response_does_not_include_execution_payload(
+    client: TestClient,
+    tool_call_api_session: Session,
+) -> None:
+    tenant = create_tenant(tool_call_api_session, "tenant-approval-payload-api")
+    agent = create_agent(client, tenant)
+    create_tool(tool_call_api_session, tenant, risk_level=RiskLevel.HIGH)
+    pending = client.post(
+        "/v1/tool-calls",
+        json=payload("approval-payload"),
+        headers=call_headers(agent["api_key"]),
+    ).json()
+
+    listed = client.get("/v1/admin/approvals", headers=admin_headers()).text
+    approved = client.post(
+        f"/v1/admin/approvals/{pending['approval_id']}/approve",
+        json={"review_reason": "Looks safe"},
+        headers=admin_headers(),
+    ).text
+
+    assert "arguments_payload" not in listed
+    assert "arguments_payload" not in approved

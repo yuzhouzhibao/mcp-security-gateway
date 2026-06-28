@@ -234,6 +234,7 @@ class ToolCallModel(Base):
     target_tool: Mapped[str] = mapped_column(String(255), nullable=False)
     arguments_redacted: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     arguments_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    arguments_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     tool_schema_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     policy_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

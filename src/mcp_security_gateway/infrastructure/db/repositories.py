@@ -5,7 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from mcp_security_gateway.domain.enums import ApprovalStatus, EntityStatus
+from mcp_security_gateway.domain.enums import ApprovalStatus, EntityStatus, ToolCallStatus
 from mcp_security_gateway.domain.policy import PolicyRepositoryError
 from mcp_security_gateway.infrastructure.db.models import (
     AgentModel,
@@ -202,6 +202,32 @@ class SQLAlchemyToolCallRepository:
         self._session.flush()
         return tool_call
 
+    def transition_status(
+        self,
+        tool_call_id: UUID,
+        expected_status: ToolCallStatus,
+        next_status: ToolCallStatus,
+    ) -> ToolCallModel | None:
+        statement = (
+            update(ToolCallModel)
+            .where(
+                ToolCallModel.id == tool_call_id,
+                ToolCallModel.status == expected_status,
+            )
+            .values(status=next_status, updated_at=utc_now())
+            .returning(ToolCallModel)
+        )
+        return self._session.scalar(statement)
+
+    def clear_arguments_payload(self, tool_call_id: UUID) -> ToolCallModel | None:
+        statement = (
+            update(ToolCallModel)
+            .where(ToolCallModel.id == tool_call_id)
+            .values(arguments_payload=None, updated_at=utc_now())
+            .returning(ToolCallModel)
+        )
+        return self._session.scalar(statement)
+
 
 class SQLAlchemyApprovalRequestRepository:
     _terminal_statuses = frozenset(
@@ -231,6 +257,21 @@ class SQLAlchemyApprovalRequestRepository:
             ).all()
         )
 
+    def list_filtered(
+        self,
+        status: ApprovalStatus | None,
+        tenant_id: UUID | None,
+        limit: int | None,
+    ) -> Sequence[ApprovalRequestModel]:
+        statement = select(ApprovalRequestModel).order_by(ApprovalRequestModel.created_at.asc())
+        if status is not None:
+            statement = statement.where(ApprovalRequestModel.status == status)
+        if tenant_id is not None:
+            statement = statement.where(ApprovalRequestModel.tenant_id == tenant_id)
+        if limit is not None:
+            statement = statement.limit(limit)
+        return list(self._session.scalars(statement).all())
+
     def get_by_tool_call_id(self, tool_call_id: UUID) -> ApprovalRequestModel | None:
         return self._session.scalar(
             select(ApprovalRequestModel).where(ApprovalRequestModel.tool_call_id == tool_call_id)
@@ -241,6 +282,7 @@ class SQLAlchemyApprovalRequestRepository:
         approval_id: UUID,
         expected_status: ApprovalStatus,
         next_status: ApprovalStatus,
+        review_reason: str | None = None,
     ) -> ApprovalRequestModel | None:
         if expected_status in self._terminal_statuses:
             return None
@@ -257,6 +299,8 @@ class SQLAlchemyApprovalRequestRepository:
             values["denied_at"] = now
         if next_status == ApprovalStatus.EXECUTED:
             values["executed_at"] = now
+        if review_reason is not None:
+            values["review_reason"] = review_reason
 
         statement = (
             update(ApprovalRequestModel)

@@ -9,6 +9,12 @@ from mcp_security_gateway.application.services.errors import (
     AgentNameConflictError,
     AgentNotFoundError,
     ApplicationError,
+    ApprovalAlreadyProcessedError,
+    ApprovalDeniedError,
+    ApprovalExecutionFailedError,
+    ApprovalExpiredError,
+    ApprovalNotFoundError,
+    ApprovalNotPendingError,
     ArgumentSchemaInvalidError,
     IdempotencyConflictError,
     McpClientNotConfiguredError,
@@ -72,6 +78,18 @@ def status_code_for_error(error: ApplicationError) -> int:
     if isinstance(error, IdempotencyConflictError):
         return 409
     if isinstance(error, McpClientNotConfiguredError):
+        return 500
+    if isinstance(error, ApprovalNotFoundError):
+        return 404
+    if isinstance(
+        error,
+        ApprovalNotPendingError
+        | ApprovalAlreadyProcessedError
+        | ApprovalExpiredError
+        | ApprovalDeniedError,
+    ):
+        return 409
+    if isinstance(error, ApprovalExecutionFailedError):
         return 500
     return 500
 

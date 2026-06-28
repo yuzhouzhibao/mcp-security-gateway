@@ -14,6 +14,7 @@ from mcp_security_gateway.application.services.audit_service import AuditService
 from mcp_security_gateway.application.services.errors import (
     AgentDisabledError,
     AgentNameConflictError,
+    ApprovalAlreadyProcessedError,
 )
 from mcp_security_gateway.application.services.policy_engine import PolicyService
 from mcp_security_gateway.application.services.tool_call_service import (
@@ -41,6 +42,7 @@ from mcp_security_gateway.infrastructure.db.models import (
     ToolCallModel,
     ToolDefinitionModel,
     ToolServerModel,
+    utc_now,
 )
 from mcp_security_gateway.infrastructure.db.repositories import (
     SQLAlchemyAgentRepository,
@@ -205,16 +207,31 @@ def tool_call_service(
     mcp_client: TestOnlyMcpClient,
 ) -> ToolCallService:
     approval_repository = SQLAlchemyApprovalRequestRepository(session)
+    audit_service = AuditService(SQLAlchemyAuditEventRepository(session))
     return ToolCallService(
         tool_server_repository=SQLAlchemyToolServerRepository(session),
         tool_definition_repository=SQLAlchemyToolDefinitionRepository(session),
         tool_call_repository=SQLAlchemyToolCallRepository(session),
         approval_repository=approval_repository,
         policy_repository=SQLAlchemyPolicyRepository(session),
-        audit_service=AuditService(SQLAlchemyAuditEventRepository(session)),
-        approval_service=ApprovalService(approval_repository, 900),
+        audit_service=audit_service,
+        approval_service=ApprovalService(
+            approval_repository,
+            900,
+            tool_call_repository=SQLAlchemyToolCallRepository(session),
+            audit_service=audit_service,
+        ),
         mcp_client=mcp_client,
         mcp_call_timeout_seconds=5,
+    )
+
+
+def approval_service(session: Session) -> ApprovalService:
+    return ApprovalService(
+        SQLAlchemyApprovalRequestRepository(session),
+        900,
+        tool_call_repository=SQLAlchemyToolCallRepository(session),
+        audit_service=AuditService(SQLAlchemyAuditEventRepository(session)),
     )
 
 
@@ -848,3 +865,230 @@ async def test_tool_call_gateway_raw_secret_not_stored_in_audit_or_tool_call(
     assert secret_value not in repr(audit_event.arguments_redacted)
     assert tool_call.arguments_hash is not None
     assert audit_event.arguments_hash is not None
+
+
+async def create_pending_approval_with_service(
+    session: Session,
+    tenant_name: str,
+    client: TestOnlyMcpClient,
+    arguments: dict[str, object] | None = None,
+) -> tuple[TenantModel, AgentModel, ApprovalRequestModel, ToolCallService]:
+    tenant = create_tenant(session, tenant_name)
+    agent_model = create_agent(session, tenant.id)
+    server = create_tool_server(session, tenant.id)
+    create_tool_definition(session, tenant.id, server.id, risk_level=RiskLevel.HIGH)
+    service = tool_call_service(session, client)
+    pending = await service.call_tool(
+        agent_dto(agent_model),
+        service_request(arguments=arguments),
+    )
+    assert pending.approval_id is not None
+    approval = SQLAlchemyApprovalRequestRepository(session).get_by_id(pending.approval_id)
+    assert approval is not None
+    return tenant, agent_model, approval, service
+
+
+@pytest.mark.asyncio
+async def test_approval_approve_persists_executed_statuses(db_session: Session) -> None:
+    tenant, _, approval, service = await create_pending_approval_with_service(
+        db_session,
+        "tenant-approval-executed",
+        TestOnlyMcpClient(result={"ok": True}),
+    )
+
+    result = await approval_service(db_session).approve_approval(
+        approval_id=approval.id,
+        review_reason="Looks safe",
+        tool_call_service=service,
+    )
+
+    stored_approval = SQLAlchemyApprovalRequestRepository(db_session).get_by_id(approval.id)
+    stored_tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ApprovalStatus.EXECUTED
+    assert stored_approval is not None
+    assert stored_approval.status == ApprovalStatus.EXECUTED
+    assert stored_tool_call is not None
+    assert stored_tool_call.status == ToolCallStatus.SUCCEEDED
+    assert stored_tool_call.arguments_payload is None
+    assert [event.status for event in audit_events][-2:] == ["approved", "executed"]
+
+
+@pytest.mark.asyncio
+async def test_approval_deny_persists_denied_status(db_session: Session) -> None:
+    tenant, _, approval, _ = await create_pending_approval_with_service(
+        db_session,
+        "tenant-approval-denied",
+        TestOnlyMcpClient(),
+    )
+
+    result = approval_service(db_session).deny_approval(
+        approval_id=approval.id,
+        review_reason="Too risky",
+    )
+
+    stored_approval = SQLAlchemyApprovalRequestRepository(db_session).get_by_id(approval.id)
+    stored_tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ApprovalStatus.DENIED
+    assert stored_approval is not None
+    assert stored_approval.status == ApprovalStatus.DENIED
+    assert stored_tool_call is not None
+    assert stored_tool_call.status == ToolCallStatus.DENIED
+    assert stored_tool_call.arguments_payload is None
+    assert audit_events[-1].status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_approval_expiration_persists_without_execution(db_session: Session) -> None:
+    tenant, _, approval, service = await create_pending_approval_with_service(
+        db_session,
+        "tenant-approval-expired",
+        TestOnlyMcpClient(),
+    )
+    approval.expires_at = utc_now() - timedelta(seconds=1)
+
+    result = await approval_service(db_session).approve_approval(
+        approval_id=approval.id,
+        review_reason="Looks safe",
+        tool_call_service=service,
+    )
+
+    stored_approval = SQLAlchemyApprovalRequestRepository(db_session).get_by_id(approval.id)
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ApprovalStatus.EXPIRED
+    assert stored_approval is not None
+    assert stored_approval.status == ApprovalStatus.EXPIRED
+    stored_tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
+    assert stored_tool_call is not None
+    assert stored_tool_call.arguments_payload is None
+    assert audit_events[-1].error_code == "approval_expired"
+
+
+def test_approval_conditional_update_mismatch_fails(db_session: Session) -> None:
+    tenant = create_tenant(db_session, "tenant-approval-conditional")
+    agent_model = create_agent(db_session, tenant.id)
+    tool_call = create_tool_call(db_session, tenant.id, agent_model.id)
+    approval = ApprovalRequestModel(
+        tenant_id=tenant.id,
+        agent_id=agent_model.id,
+        tool_call_id=tool_call.id,
+        target_server="filesystem",
+        target_tool="read_file",
+        arguments_redacted={"path": "/workspace/example.txt"},
+        arguments_hash="args-hash-conditional",
+        status=ApprovalStatus.PENDING,
+        requested_reason="Review required",
+        reviewer_id=None,
+        review_reason=None,
+        expires_at=utc_now() + timedelta(minutes=10),
+        approved_at=None,
+        denied_at=None,
+        executed_at=None,
+    )
+    repository = SQLAlchemyApprovalRequestRepository(db_session)
+    repository.create(approval)
+
+    mismatch = repository.transition_status(
+        approval.id,
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.EXECUTED,
+    )
+
+    assert mismatch is None
+    stored = repository.get_by_id(approval.id)
+    assert stored is not None
+    assert stored.status == ApprovalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_double_approve_cannot_execute_twice(db_session: Session) -> None:
+    client = TestOnlyMcpClient()
+    _, _, approval, service = await create_pending_approval_with_service(
+        db_session,
+        "tenant-approval-double-execute",
+        client,
+    )
+    approvals = approval_service(db_session)
+    first = await approvals.approve_approval(
+        approval_id=approval.id,
+        review_reason="Looks safe",
+        tool_call_service=service,
+    )
+
+    with pytest.raises(ApprovalAlreadyProcessedError):
+        await approvals.approve_approval(
+            approval_id=approval.id,
+            review_reason="Again",
+            tool_call_service=service,
+        )
+
+    assert first.status == ApprovalStatus.EXECUTED
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_payload_is_stored_only_on_tool_call(db_session: Session) -> None:
+    _, _, approval, _ = await create_pending_approval_with_service(
+        db_session,
+        "tenant-approval-payload-storage",
+        TestOnlyMcpClient(),
+    )
+    tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
+
+    assert tool_call is not None
+    assert tool_call.arguments_payload == {"path": "/workspace/example.txt"}
+    assert not hasattr(approval, "arguments_payload")
+
+
+@pytest.mark.asyncio
+async def test_approval_audit_never_stores_payload_secret(db_session: Session) -> None:
+    secret_value = "payload-sensitive-value"
+    tenant = create_tenant(db_session, "tenant-approval-secret-audit")
+    agent_model = create_agent(db_session, tenant.id)
+    server = create_tool_server(db_session, tenant.id)
+    create_tool_definition(
+        db_session,
+        tenant.id,
+        server.id,
+        schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "session": {"type": "string"}},
+        },
+    )
+    tool_call = create_tool_call(db_session, tenant.id, agent_model.id)
+    tool_call.arguments_payload = {
+        "path": "/workspace/example.txt",
+        "session": secret_value,
+    }
+    approval = ApprovalRequestModel(
+        tenant_id=tenant.id,
+        agent_id=agent_model.id,
+        tool_call_id=tool_call.id,
+        target_server="filesystem",
+        target_tool="read_file",
+        arguments_redacted={"path": "/workspace/example.txt", "session": "[REDACTED]"},
+        arguments_hash="args-hash-secret-approval",
+        status=ApprovalStatus.PENDING,
+        requested_reason="Review required",
+        reviewer_id=None,
+        review_reason=None,
+        expires_at=utc_now() + timedelta(minutes=10),
+        approved_at=None,
+        denied_at=None,
+        executed_at=None,
+    )
+    SQLAlchemyApprovalRequestRepository(db_session).create(approval)
+
+    result = await approval_service(db_session).approve_approval(
+        approval_id=approval.id,
+        review_reason="Looks safe",
+        tool_call_service=tool_call_service(db_session, TestOnlyMcpClient()),
+    )
+
+    audit_events = SQLAlchemyAuditEventRepository(db_session).list_by_tenant(tenant.id)
+    assert result.status == ApprovalStatus.EXECUTED
+    assert secret_value not in repr(audit_events)
+    stored_tool_call = SQLAlchemyToolCallRepository(db_session).get_by_id(approval.tool_call_id)
+    assert stored_tool_call is not None
+    assert stored_tool_call.arguments_payload is None

@@ -39,3 +39,15 @@ Phase 5 connects Policy Engine to `POST /v1/tool-calls`:
 - ToolCall and AuditEvent rows store redacted arguments and canonical hashes, not raw arguments.
 - Tool lookup failure, schema validation failure, deny, require-approval, success, and upstream failure append audit events.
 - Idempotency keys reuse existing failed results rather than automatically retrying them in the MVP.
+
+Phase 6 adds approval execution:
+
+- Approval APIs require admin authentication.
+- ApprovalService uses conditional status updates so only a pending approval can become approved or denied.
+- Approve performs pending to approved, then ToolCallService executes the stored server-side execution payload and records executed or failed.
+- Deny performs pending to denied and never calls upstream.
+- Expired approvals become expired and do not call upstream; their ToolCall is marked denied with `approval_expired`.
+- Executed, denied, expired, and failed approvals are terminal. Failed approvals are not automatically retried.
+- Approved execution uses `tool_calls.arguments_payload`, never redacted arguments.
+- `arguments_payload` exists only while an approval is pending execution. It is cleared after executed, failed, denied, or expired approval outcomes.
+- `arguments_payload` is not returned by APIs and is not written to audit events or logs. The MVP stores this server-side payload as JSONB; production hardening should encrypt it with a managed key service.

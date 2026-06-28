@@ -1,9 +1,16 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from mcp_security_gateway.domain.enums import AgentRole, EntityStatus, PolicyEffect, ToolCallStatus
+from mcp_security_gateway.domain.enums import (
+    AgentRole,
+    ApprovalStatus,
+    EntityStatus,
+    PolicyEffect,
+    ToolCallStatus,
+)
 
 
 class AgentCreateRequest(BaseModel):
@@ -49,3 +56,42 @@ class ToolCallResponse(BaseModel):
     error: ToolCallErrorBody | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ApprovalListItem(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    agent_id: UUID
+    tool_call_id: UUID
+    target_server: str
+    target_tool: str
+    arguments_redacted: dict[str, Any]
+    arguments_hash: str
+    status: ApprovalStatus
+    requested_reason: str | None
+    expires_at: datetime
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApprovalListResponse(BaseModel):
+    items: list[ApprovalListItem]
+
+
+class ApprovalReviewRequest(BaseModel):
+    review_reason: str
+
+
+class ApprovalActionErrorBody(BaseModel):
+    code: str
+    message: str
+
+
+class ApprovalActionResponse(BaseModel):
+    approval_id: UUID
+    tool_call_id: UUID
+    status: ApprovalStatus
+    tool_call_status: ToolCallStatus
+    result: dict[str, Any] | None = None
+    error: ApprovalActionErrorBody | None = None

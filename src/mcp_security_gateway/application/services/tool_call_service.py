@@ -13,7 +13,11 @@ from mcp_security_gateway.application.ports.mcp_client import (
     McpUpstreamTimeoutError,
 )
 from mcp_security_gateway.application.services.agent_service import AgentDTO
-from mcp_security_gateway.application.services.approval_service import ApprovalService
+from mcp_security_gateway.application.services.approval_service import (
+    ApprovalActionError,
+    ApprovalActionResult,
+    ApprovalService,
+)
 from mcp_security_gateway.application.services.audit_service import AuditService
 from mcp_security_gateway.application.services.errors import (
     ArgumentSchemaInvalidError,
@@ -28,6 +32,7 @@ from mcp_security_gateway.application.services.policy_engine import (
 )
 from mcp_security_gateway.domain.enums import (
     ActionType,
+    ApprovalStatus,
     EntityStatus,
     PolicyEffect,
     RiskLevel,
@@ -185,6 +190,11 @@ class ToolCallService:
             trace_id=trace_id,
             arguments_redacted=policy_result.arguments_redacted,
             arguments_hash=policy_result.arguments_hash,
+            arguments_payload=(
+                request.arguments
+                if policy_result.decision == PolicyEffect.REQUIRE_APPROVAL
+                else None
+            ),
             tool_schema_hash=tool.schema_hash,
             policy_decision=policy_result.decision.value,
             decision_reason=policy_result.reason,
@@ -255,6 +265,105 @@ class ToolCallService:
             result=upstream_result,
         )
 
+    async def execute_approved_tool_call(self, approval: Any) -> ApprovalActionResult:
+        tool_call = self._tool_call_repository.get_by_id(approval.tool_call_id)
+        if tool_call is None:
+            return self._approval_execution_failed(
+                approval,
+                None,
+                "approval_execution_failed",
+                "Approved tool call was not found",
+            )
+        arguments = tool_call.arguments_payload
+        if arguments is None:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "approval_execution_failed",
+                "Execution payload is not available",
+            )
+
+        server = self._tool_server_repository.get_by_server_id(
+            approval.tenant_id,
+            approval.target_server,
+        )
+        if server is None or server.status != EntityStatus.ACTIVE:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "tool_disabled",
+                "Tool server is not active",
+            )
+
+        tool = self._tool_definition_repository.get_by_name(
+            approval.tenant_id,
+            server.id,
+            approval.target_tool,
+        )
+        if tool is None or tool.status != EntityStatus.ACTIVE:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "tool_disabled",
+                "Tool is not active",
+            )
+
+        if self._mcp_client is None:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "mcp_client_not_configured",
+                "MCP client is not configured",
+            )
+
+        try:
+            upstream_result = await self._mcp_client.call_tool(
+                server=server,
+                tool=tool,
+                arguments=arguments,
+                timeout_seconds=self._mcp_call_timeout_seconds,
+            )
+        except McpUpstreamTimeoutError:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "upstream_timeout",
+                "Upstream timed out",
+            )
+        except McpUpstreamError:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "upstream_failed",
+                "Upstream tool call failed",
+            )
+
+        tool_call.status = ToolCallStatus.SUCCEEDED
+        tool_call.error_code = None
+        tool_call.error_message = None
+        self._tool_call_repository.update(tool_call)
+        self._tool_call_repository.clear_arguments_payload(tool_call.id)
+        executed = self._approval_repository.transition_status(
+            approval.id,
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.EXECUTED,
+        )
+        if executed is None:
+            return self._approval_execution_failed(
+                approval,
+                tool_call,
+                "approval_already_processed",
+                "Approval request was already processed",
+            )
+        self._append_tool_call_audit(tool_call, status="executed")
+        return ApprovalActionResult(
+            approval_id=approval.id,
+            tool_call_id=approval.tool_call_id,
+            status=ApprovalStatus.EXECUTED,
+            tool_call_status=ToolCallStatus.SUCCEEDED,
+            result=dict(upstream_result),
+        )
+
     def _policy_repository_evaluate(
         self,
         *,
@@ -315,6 +424,7 @@ class ToolCallService:
         trace_id: str,
         arguments_redacted: dict[str, Any],
         arguments_hash: str,
+        arguments_payload: dict[str, Any] | None,
         tool_schema_hash: str | None,
         policy_decision: str | None,
         decision_reason: str | None,
@@ -331,6 +441,7 @@ class ToolCallService:
                     target_tool=request.target_tool,
                     arguments_redacted=arguments_redacted,
                     arguments_hash=arguments_hash,
+                    arguments_payload=arguments_payload,
                     tool_schema_hash=tool_schema_hash,
                     policy_decision=policy_decision,
                     decision_reason=decision_reason,
@@ -408,7 +519,55 @@ class ToolCallService:
             error=ToolCallError(code=error_code, message=error_message),
         )
 
-    def _append_tool_call_audit(self, tool_call: ToolCallModel) -> None:
+    def _approval_execution_failed(
+        self,
+        approval: Any,
+        tool_call: ToolCallModel | None,
+        error_code: str,
+        error_message: str,
+    ) -> ApprovalActionResult:
+        if tool_call is not None:
+            tool_call.status = ToolCallStatus.FAILED
+            tool_call.error_code = error_code
+            tool_call.error_message = error_message
+            self._tool_call_repository.update(tool_call)
+            self._tool_call_repository.clear_arguments_payload(tool_call.id)
+        failed = self._approval_repository.transition_status(
+            approval.id,
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.FAILED,
+        )
+        self._audit_service.append_tool_call_event(
+            trace_id=tool_call.trace_id if tool_call is not None else None,
+            tenant_id=approval.tenant_id,
+            agent_id=approval.agent_id,
+            target_server=approval.target_server,
+            target_tool=approval.target_tool,
+            arguments_redacted=approval.arguments_redacted,
+            arguments_hash=approval.arguments_hash,
+            policy_decision=None,
+            decision_reason=approval.requested_reason,
+            approval_id=approval.id,
+            status="failed",
+            error_code=error_code,
+            error_message=error_message,
+            metadata={"tool_call_id": str(approval.tool_call_id)},
+        )
+        return ApprovalActionResult(
+            approval_id=approval.id,
+            tool_call_id=approval.tool_call_id,
+            status=ApprovalStatus.FAILED if failed is not None else ApprovalStatus(approval.status),
+            tool_call_status=(
+                ToolCallStatus(tool_call.status) if tool_call is not None else ToolCallStatus.FAILED
+            ),
+            error=ApprovalActionError(error_code, error_message),
+        )
+
+    def _append_tool_call_audit(
+        self,
+        tool_call: ToolCallModel,
+        status: str | None = None,
+    ) -> None:
         self._audit_service.append_tool_call_event(
             trace_id=tool_call.trace_id,
             tenant_id=tool_call.tenant_id,
@@ -420,7 +579,7 @@ class ToolCallService:
             policy_decision=tool_call.policy_decision,
             decision_reason=tool_call.decision_reason,
             approval_id=tool_call.approval_id,
-            status=ToolCallStatus(tool_call.status).value,
+            status=status or ToolCallStatus(tool_call.status).value,
             error_code=tool_call.error_code,
             error_message=tool_call.error_message,
             metadata={"tool_call_id": str(tool_call.id)},

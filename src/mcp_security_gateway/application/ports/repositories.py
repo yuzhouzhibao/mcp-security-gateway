@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from typing import Protocol, TypeVar
 from uuid import UUID
 
-from mcp_security_gateway.domain.enums import ApprovalStatus
+from mcp_security_gateway.domain.enums import ApprovalStatus, ToolCallStatus
 
 TenantT = TypeVar("TenantT")
 AgentT = TypeVar("AgentT")
@@ -85,6 +85,15 @@ class ToolCallRepository(Protocol[ToolCallT]):
 
     def update(self, tool_call: ToolCallT) -> ToolCallT: ...
 
+    def transition_status(
+        self,
+        tool_call_id: UUID,
+        expected_status: ToolCallStatus,
+        next_status: ToolCallStatus,
+    ) -> ToolCallT | None: ...
+
+    def clear_arguments_payload(self, tool_call_id: UUID) -> ToolCallT | None: ...
+
 
 class ApprovalRequestRepository(Protocol[ApprovalRequestT]):
     def create(self, approval: ApprovalRequestT) -> ApprovalRequestT: ...
@@ -93,6 +102,13 @@ class ApprovalRequestRepository(Protocol[ApprovalRequestT]):
 
     def list_by_tenant(self, tenant_id: UUID) -> Sequence[ApprovalRequestT]: ...
 
+    def list_filtered(
+        self,
+        status: ApprovalStatus | None,
+        tenant_id: UUID | None,
+        limit: int | None,
+    ) -> Sequence[ApprovalRequestT]: ...
+
     def get_by_tool_call_id(self, tool_call_id: UUID) -> ApprovalRequestT | None: ...
 
     def transition_status(
@@ -100,6 +116,7 @@ class ApprovalRequestRepository(Protocol[ApprovalRequestT]):
         approval_id: UUID,
         expected_status: ApprovalStatus,
         next_status: ApprovalStatus,
+        review_reason: str | None = None,
     ) -> ApprovalRequestT | None: ...
 
 

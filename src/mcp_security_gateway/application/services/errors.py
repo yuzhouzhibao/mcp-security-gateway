@@ -87,3 +87,33 @@ class IdempotencyConflictError(ApplicationError):
 class McpClientNotConfiguredError(ApplicationError):
     def __init__(self) -> None:
         super().__init__("mcp_client_not_configured", "MCP client is not configured")
+
+
+class ApprovalNotFoundError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("approval_not_found", "Approval request was not found")
+
+
+class ApprovalNotPendingError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("approval_not_pending", "Approval request is not pending")
+
+
+class ApprovalAlreadyProcessedError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("approval_already_processed", "Approval request was already processed")
+
+
+class ApprovalExpiredError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("approval_expired", "Approval request has expired")
+
+
+class ApprovalExecutionFailedError(ApplicationError):
+    def __init__(self, details: dict[str, Any] | None = None) -> None:
+        super().__init__("approval_execution_failed", "Approval execution failed", details)
+
+
+class ApprovalDeniedError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__("approval_denied", "Approval request was denied")
