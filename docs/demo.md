@@ -31,6 +31,8 @@ docker compose up -d postgres
 
 If Docker is not available, run PostgreSQL yourself and set `DATABASE_URL`.
 
+The demo starts the API with `uvicorn`, not the compose app service. If you choose to run the app through compose, set `ENV_FILE=.env` so the app reads your edited local environment file instead of `.env.example`.
+
 Run migrations:
 
 ```powershell

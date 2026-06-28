@@ -1,7 +1,7 @@
 [project]
 name = "mcp-security-gateway"
 version = "0.1.0"
-description = "Security gateway skeleton for MCP server access control."
+description = "Policy, approval, and audit gateway between AI agents and MCP tools."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

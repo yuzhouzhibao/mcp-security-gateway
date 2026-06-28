@@ -35,6 +35,15 @@ docker compose up -d postgres
 
 If Docker is not available, run PostgreSQL yourself and set `DATABASE_URL`.
 
+The compose file defaults to `ENV_FILE=.env.example` only so `docker compose config` works in clean CI checkouts. For local app runs, the recommended path is `uv run uvicorn ...` with your edited `.env`. If you intentionally run the app service through compose, set:
+
+```powershell
+$env:ENV_FILE = ".env"
+docker compose up app
+```
+
+Do not run production-like app sessions with placeholder secrets from `.env.example`.
+
 ## Tests
 
 Unit and API tests:

@@ -68,6 +68,15 @@ uv run alembic upgrade head
 uv run uvicorn mcp_security_gateway.main:app --reload
 ```
 
+The compose file is primarily used to run PostgreSQL locally and validate configuration in CI. If you intentionally run the app service through compose, use your edited `.env` file:
+
+```powershell
+$env:ENV_FILE = ".env"
+docker compose up app
+```
+
+Leaving `ENV_FILE` unset makes compose use `.env.example` so `docker compose config` works in clean CI checkouts; do not use placeholder secrets for production-like app runs.
+
 Health checks:
 
 ```powershell
